@@ -46,10 +46,11 @@ from dp_gwas_core import (
     spectral_gap,
     make_adjacency,
     split_data_across_centers,
-    compute_score_stats,
+    score_stats_precompute,
+    _score_stats_from_precomputed,
     log_belief_init,
     laplace_noise_log_belief,
-    log_linear_update,
+    log_linear_update_all,
     sensitivity_score_stat,
     DPGWASResult,
 )
@@ -222,12 +223,16 @@ def run_dp_gwas_custom_network(
     binary_trait: bool = False,
     track_per_hospital: bool = False,
     seed: int = 0,
+    snp_chunk_size: int | None = None,
+    convergence_tv_max_snps: int | None = None,
 ) -> dict:
     """
     Like run_dp_gwas_mle but accepts an arbitrary adjacency matrix A
     and additionally returns per-hospital belief traces when requested.
+
+    ``snp_chunk_size`` bounds peak memory for the belief tensor; see
+    :func:`dp_gwas_core.run_dp_gwas_mle`.
     """
-    rng = np.random.default_rng(seed)
     n_centers = len(centers_data)
     M = centers_data[0]["G_std"].shape[1]
     n_states = 2
@@ -237,58 +242,85 @@ def run_dp_gwas_custom_network(
         for c in centers_data
     ]
 
-    round_final_log_beliefs = []
-    noisy_stat_rounds = []
+    pres = [score_stats_precompute(c["y"], binary_trait) for c in centers_data]
+    chunk_size = M if snp_chunk_size is None else int(snp_chunk_size)
+    chunk_size = max(1, min(chunk_size, M))
+
+    noisy_stat_sum = np.zeros(M, dtype=np.float64)
+    gm_accum = np.zeros((M, n_states), dtype=np.float64)
+    log_prob_am_merged = np.empty((M, n_states), dtype=np.float64)
     per_hospital_traces = {i: [] for i in range(n_centers)} if track_per_hospital else {}
-    tv_trace = []
+    tv_trace: list[float] = []
 
-    for k in range(K):
-        rng_k = np.random.default_rng(seed * 10000 + k)
+    for j0 in range(0, M, chunk_size):
+        j1 = min(j0 + chunk_size, M)
+        sl = slice(j0, j1)
+        B = j1 - j0
 
-        # Stage 1: noisy aggregate score statistic
-        noisy_sum_k = np.zeros(M)
+        llr_block = np.stack(
+            [
+                _score_stats_from_precomputed(centers_data[ic]["G_std"][:, sl], pres[ic])
+                for ic in range(n_centers)
+            ],
+            axis=0,
+        )
 
-        # Stage 2: noisy log-beliefs for consensus
-        log_beliefs = []
-        for i, cdata in enumerate(centers_data):
-            log_llr_i = compute_score_stats(cdata["G_std"], cdata["y"], binary=binary_trait)
-            delta_i = sensitivities[i]
-            noise_scale = delta_i * K * n_states / epsilon
-            noisy_sum_k += log_llr_i + rng_k.laplace(0.0, noise_scale, M)
+        am_chunk: np.ndarray | None = None
+        for k in range(K):
+            rng_k = np.random.default_rng(seed * 10000 + k)
+            belief_rows = []
+            noisy_chunk = np.zeros(B, dtype=np.float64)
+            for i, cdata in enumerate(centers_data):
+                delta_i = sensitivities[i]
+                noise_scale = delta_i * K * n_states / epsilon
+                llr_i = llr_block[i]
+                noisy_chunk += llr_i + rng_k.laplace(0.0, noise_scale, B)
+                lb_i = log_belief_init(llr_i)
+                lb_noisy = laplace_noise_log_belief(
+                    lb_i, delta_i, epsilon, n_states, K, rng_k
+                )
+                belief_rows.append(lb_noisy)
 
-            lb_i = log_belief_init(log_llr_i)
-            lb_noisy = laplace_noise_log_belief(lb_i, delta_i, epsilon, n_states, K, rng_k)
-            log_beliefs.append(lb_noisy)
+            noisy_stat_sum[sl] += noisy_chunk
+            belief_tensor = np.stack(belief_rows, axis=0)
 
-        noisy_stat_rounds.append(noisy_sum_k)
+            for t in range(T):
+                belief_tensor = log_linear_update_all(belief_tensor, A)
 
-        for t in range(T):
-            log_beliefs = [log_linear_update(log_beliefs, A, i) for i in range(n_centers)]
+                if track_per_hospital and k == 0 and j0 == 0:
+                    for i in range(n_centers):
+                        p_alt = float(np.exp(belief_tensor[i, 0, 1]))
+                        per_hospital_traces[i].append(p_alt)
+                    n_tv = B if convergence_tv_max_snps is None else min(
+                        B, int(convergence_tv_max_snps)
+                    )
+                    lbr = belief_tensor[:, :n_tv, 1] - belief_tensor[:, :n_tv, 0]
+                    tv_trace.append(float(np.std(lbr)))
 
-            if track_per_hospital and k == 0:
-                for i in range(n_centers):
-                    p_alt = float(np.exp(log_beliefs[i][0, 1]))
-                    per_hospital_traces[i].append(p_alt)
-                lbr = np.array([lb[:, 1] - lb[:, 0] for lb in log_beliefs])
-                tv_trace.append(float(np.std(lbr)))
+            gm_accum[sl] += belief_tensor.mean(axis=0)
+            ls_round = logsumexp(belief_tensor, axis=0)
+            if am_chunk is None:
+                am_chunk = ls_round
+            else:
+                am_chunk = logsumexp(
+                    np.stack([am_chunk, ls_round], axis=0), axis=0
+                )
 
-        round_final_log_beliefs.append(np.array(log_beliefs))
+        log_prob_am_merged[sl] = am_chunk
 
     # Stage 1: calibrated p-values from noisy aggregate statistic
     # Under H0: 2 * sum_i Lambda_i ~ chi2_{n_centers}
-    agg_stat = np.mean(noisy_stat_rounds, axis=0)
+    agg_stat = noisy_stat_sum / float(K)
     chi2_agg = np.clip(2.0 * agg_stat, 0.0, None)
     pvalues = chi2.sf(chi2_agg, df=n_centers)
 
     # Stage 2: belief aggregation for SNP ranking
-    stacked = np.array(round_final_log_beliefs)   # (K, n, M, 2)
-
-    log_beliefs_gm = stacked.mean(axis=0).mean(axis=0)
+    log_beliefs_gm = gm_accum / float(K)
     lse = logsumexp(log_beliefs_gm, axis=1, keepdims=True)
     log_beliefs_gm = log_beliefs_gm - lse
     lbr_gm = log_beliefs_gm[:, 1] - log_beliefs_gm[:, 0]
 
-    log_prob_am = logsumexp(stacked, axis=(0, 1)) - np.log(K * n_centers)
+    log_prob_am = log_prob_am_merged - np.log(K * n_centers)
     lse2 = logsumexp(log_prob_am, axis=1, keepdims=True)
     log_prob_am = log_prob_am - lse2
     lbr_am = log_prob_am[:, 1] - log_prob_am[:, 0]
@@ -466,7 +498,9 @@ def exp7b_privacy_utility(
     """
     Privacy-utility tradeoff on the real NYC network.
     Uses the k-NN geographic topology and bed-proportional cohort sizes.
-    Overlays oracle (centralised) and best single hospital (largest beds).
+    Overlays oracle (centralised), best single hospital (largest beds), and
+    no-DP distributed (:func:`run_dp_gwas_custom_network` with ``K=1``,
+    ``epsilon=np.inf``).
     """
     if epsilons is None:
         epsilons = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
@@ -484,6 +518,9 @@ def exp7b_privacy_utility(
 
     power_gm, power_am, fdr_gm, fdr_am = [], [], [], []
     oracle_powers, single_powers = [], []
+    nodp_powers_gm, nodp_powers_am = [], []
+    nodp_fdrs_gm, nodp_fdrs_am = [], []
+    oracle_fdrs: list[float] = []
 
     for rep in range(n_reps):
         data = simulate_gwas_data(total_individuals, n_snps, n_causal, seed=seed + rep * 7)
@@ -494,6 +531,23 @@ def exp7b_privacy_utility(
         single = single_center_gwas(centers_data, center_idx=best_hosp_idx, alpha=ALPHA_GWAS)
         oracle_powers.append(oracle["power"])
         single_powers.append(single["power"])
+        oracle_fdrs.append(float(oracle["fdr"]))
+
+        res_nd = run_dp_gwas_custom_network(
+            centers_data,
+            A_knn,
+            epsilon=np.inf,
+            alpha=ALPHA_GWAS,
+            T=T,
+            K=1,
+            seed=seed + rep * 100,
+        )
+        m_nd_gm = evaluate_gwas(res_nd["selected_gm"], causal_idx, n_snps)
+        m_nd_am = evaluate_gwas(res_nd["selected_am"], causal_idx, n_snps)
+        nodp_powers_gm.append(m_nd_gm["power"])
+        nodp_powers_am.append(m_nd_am["power"])
+        nodp_fdrs_gm.append(m_nd_gm["fdr"])
+        nodp_fdrs_am.append(m_nd_am["fdr"])
 
     for eps in epsilons:
         p_gm_rep, p_am_rep, f_gm_rep, f_am_rep = [], [], [], []
@@ -518,6 +572,11 @@ def exp7b_privacy_utility(
 
     oracle_p = np.mean(oracle_powers)
     single_p = np.mean(single_powers)
+    nodp_p_gm = float(np.mean(nodp_powers_gm))
+    nodp_p_am = float(np.mean(nodp_powers_am))
+    oracle_fdr_m = float(np.mean(oracle_fdrs))
+    nodp_fdr_gm = float(np.mean(nodp_fdrs_gm))
+    nodp_fdr_am = float(np.mean(nodp_fdrs_am))
     eps_crit = next((e for e, p in zip(epsilons, power_gm) if p > single_p), None)
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
@@ -529,6 +588,21 @@ def exp7b_privacy_utility(
                label=f"Oracle ({n} hospitals pooled)")
     ax.axhline(single_p, color="#d85a30", linestyle="-.", linewidth=1.3,
                label=f"Best single hospital\n({best_hosp_name})")
+    ax.axhline(
+        nodp_p_gm,
+        color="#ba7517",
+        linestyle=(0, (3, 1, 1, 1)),
+        linewidth=1.35,
+        label="No DP (GM)",
+    )
+    ax.axhline(
+        nodp_p_am,
+        color="#ba7517",
+        linestyle=(0, (1, 1)),
+        linewidth=1.15,
+        alpha=0.85,
+        label="No DP (AM)",
+    )
     if eps_crit:
         ax.axvline(eps_crit, color="red", linestyle="--", alpha=0.35, linewidth=1.2,
                    label=f"ε* ≈ {eps_crit}")
@@ -542,7 +616,22 @@ def exp7b_privacy_utility(
     ax = axes[1]
     ax.plot(epsilons, fdr_gm, "o-", color="#534ab7", linewidth=1.8, label="DP-GWAS (GM)")
     ax.plot(epsilons, fdr_am, "s--", color="#1d9e75", linewidth=1.8, label="DP-GWAS (AM)")
-    ax.axhline(oracle["fdr"], color="#888780", linestyle=":", linewidth=1.5, label="Oracle")
+    ax.axhline(oracle_fdr_m, color="#888780", linestyle=":", linewidth=1.5, label="Oracle")
+    ax.axhline(
+        nodp_fdr_gm,
+        color="#ba7517",
+        linestyle=(0, (3, 1, 1, 1)),
+        linewidth=1.35,
+        label="No DP (GM)",
+    )
+    ax.axhline(
+        nodp_fdr_am,
+        color="#ba7517",
+        linestyle=(0, (1, 1)),
+        linewidth=1.15,
+        alpha=0.85,
+        label="No DP (AM)",
+    )
     ax.set_xlabel("Privacy budget (ε)")
     ax.set_ylabel("False discovery rate")
     ax.set_xscale("log")
@@ -570,9 +659,18 @@ def exp7b_privacy_utility(
     fig.savefig(OUT / "exp7b_privacy_utility_nyc.pdf", bbox_inches="tight")
     plt.close(fig)
     print(f"    → saved exp7b_privacy_utility_nyc.pdf  (ε* ≈ {eps_crit})")
-    return dict(epsilons=epsilons, power_gm=power_gm, power_am=power_am,
-                fdr_gm=fdr_gm, oracle_power=oracle_p, single_power=single_p,
-                eps_crit=eps_crit, best_hospital=best_hosp_name)
+    return dict(
+        epsilons=epsilons,
+        power_gm=power_gm,
+        power_am=power_am,
+        fdr_gm=fdr_gm,
+        oracle_power=oracle_p,
+        single_power=single_p,
+        nodp_power_gm=nodp_p_gm,
+        nodp_power_am=nodp_p_am,
+        eps_crit=eps_crit,
+        best_hospital=best_hosp_name,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -70,8 +70,10 @@ def experiment1_privacy_utility(
 ) -> dict:
     """
     Sweep epsilon in [0.05, 5].  For each epsilon, run DP-GWAS (GM + AM)
-    and record power, FDR, and F1.  Overlay the Centralized and
-    single-center baselines as horizontal dashed lines.
+    and record power, FDR, and F1.  Overlay the Centralized,
+    single-center, and no-DP distributed baselines as horizontal lines.
+    No-DP is :func:`run_dp_gwas_mle` with ``K=1`` and ``epsilon=np.inf``
+    (distributed consensus, no privacy noise).
 
     This mirrors Figures 1-2 of the paper: statistical power as a function
     of privacy budget, with a critical epsilon above which distributed DP
@@ -86,9 +88,13 @@ def experiment1_privacy_utility(
                      "power_am": [], "fdr_am": [], "f1_am": []}
                for eps in epsilons}
 
-    # Oracle & single-site benchmarks (noise-free, so computed once per rep)
-    oracle_power, oracle_fdr = [], []
-    single_power, single_fdr = [], []
+    
+
+    # Oracle, single-site, and no-DP distributed benchmarks (computed once per rep)
+    oracle_power, oracle_fdr, oracle_f1 = [], [], []
+    single_power, single_fdr, single_f1 = [], [], []
+    nodp_power_gm, nodp_power_am = [], []
+    nodp_f1_gm, nodp_f1_am = [], []
 
     for rep in range(n_reps):
         data = simulate_gwas_data(n_individuals, n_snps, n_causal, seed=seed + rep)
@@ -98,10 +104,27 @@ def experiment1_privacy_utility(
         oracle = centralized_gwas(centers, alpha=ALPHA_GWAS)
         oracle_power.append(oracle["power"])
         oracle_fdr.append(oracle["fdr"])
+        oracle_f1.append(oracle["f1"])
 
         single = single_center_gwas(centers, alpha=ALPHA_GWAS)
         single_power.append(single["power"])
         single_fdr.append(single["fdr"])
+        single_f1.append(single["f1"])
+
+        nodp = run_dp_gwas_mle(
+            centers,
+            epsilon=np.inf,
+            alpha=ALPHA_GWAS,
+            K=1,
+            topology="complete",
+            seed=seed + rep * 100,
+        )
+        m_nodp_gm = evaluate_gwas(nodp.selected_gm, causal_idx, n_snps)
+        m_nodp_am = evaluate_gwas(nodp.selected_am, causal_idx, n_snps)
+        nodp_power_gm.append(m_nodp_gm["power"])
+        nodp_power_am.append(m_nodp_am["power"])
+        nodp_f1_gm.append(m_nodp_gm["f1"])
+        nodp_f1_am.append(m_nodp_am["f1"])
 
         for eps in epsilons:
             res = run_dp_gwas_mle(
@@ -130,14 +153,27 @@ def experiment1_privacy_utility(
     se_pgm    = [se(results[e]["power_gm"])    for e in epsilons]
     se_pam    = [se(results[e]["power_am"])    for e in epsilons]
 
+    f1_gm     = [mean(results[e]["f1_gm"])     for e in epsilons]
+    f1_am     = [mean(results[e]["f1_am"])     for e in epsilons]
+
     oracle_p  = mean(oracle_power)
     single_p  = mean(single_power)
+    nodp_p_gm = mean(nodp_power_gm)
+    nodp_p_am = mean(nodp_power_am)
+    oracle_f1_m = mean(oracle_f1)
+    single_f1_m = mean(single_f1)
+    nodp_f1_gm_m = mean(nodp_f1_gm)
+    nodp_f1_am_m = mean(nodp_f1_am)
 
     # Find critical epsilon (first eps where power_gm > single_p)
     eps_crit = None
+    eps_crit_f1 = None
     for i, eps in enumerate(epsilons):
         if power_gm[i] > single_p:
             eps_crit = eps
+            break
+        if f1_gm[i] > single_p:
+            eps_crit_f1 = eps
             break
 
     # --- Plot ---
@@ -150,31 +186,61 @@ def experiment1_privacy_utility(
                 capsize=3, linewidth=1.5, linestyle="--")
     ax.axhline(oracle_p, color="gray", linestyle=":", linewidth=1.5, label="Centralized")
     ax.axhline(single_p, color="gray", linestyle="-.", linewidth=1.2, label="Single center")
+    ax.axhline(
+        nodp_p_gm,
+        color="#ba7517",
+        linestyle=(0, (3, 1, 1, 1)),
+        linewidth=1.4,
+        label="No DP (GM)",
+    )
+    ax.axhline(
+        nodp_p_am,
+        color="#ba7517",
+        linestyle=(0, (1, 1)),
+        linewidth=1.2,
+        alpha=0.85,
+        label="No DP (AM)",
+    )
     if eps_crit is not None:
         ax.axvline(eps_crit, color="red", linestyle="--", alpha=0.4, linewidth=1,
                    label=f"ε* ≈ {eps_crit}")
     ax.set_xlabel("Privacy budget ($\epsilon$)")
     ax.set_ylabel("Statistical power")
     ax.set_xscale("log")
-    ax.set_ylim(-0.05, 1.05)
-    ax.legend(fontsize=8, frameon=False)
-    ax.set_title("Power vs privacy budget")
+    ax.set_ylim(0.4, 1.05)
 
     ax = axes[1]
-    ax.plot(eps_arr, fdr_gm, marker="o", label="DP-GWAS (GM)", linewidth=1.5)
-    ax.plot(eps_arr, fdr_am, marker="s", label="DP-GWAS (AM)", linewidth=1.5, linestyle="--")
-    ax.axhline(oracle["fdr"], color="gray", linestyle=":", linewidth=1.5, label="Oracle")
-    ax.axhline(ALPHA_GWAS, color="red", linestyle="--", linewidth=1, alpha=0.6, label="$\\alpha_{GWAS}$ (significance threshold)")
+    ax.plot(eps_arr, f1_gm, marker="o", label="DP-GWAS (GM)", linewidth=1.5)
+    ax.plot(eps_arr, f1_am, marker="s", label="DP-GWAS (AM)", linewidth=1.5, linestyle="--")
+    ax.axhline(oracle_f1_m, color="gray", linestyle=":", linewidth=1.5, label="Centralized")
+    ax.axhline(single_f1_m, color="gray", linestyle="-.", linewidth=1.2, label="Single center")
+    ax.axhline(
+        nodp_f1_gm_m,
+        color="#ba7517",
+        linestyle=(0, (3, 1, 1, 1)),
+        linewidth=1.4,
+        label="No DP (GM)",
+    )
+    ax.axhline(
+        nodp_f1_am_m,
+        color="#ba7517",
+        linestyle=(0, (1, 1)),
+        linewidth=1.2,
+        alpha=0.85,
+        label="No DP (AM)",
+    )
+    if eps_crit_f1 is not None:
+        ax.axvline(eps_crit_f1, color="red", linestyle="--", alpha=0.4, linewidth=1,
+                   label=f"ε* ≈ {eps_crit_f1}")
     ax.set_xlabel("Privacy budget ($\epsilon$)")
-    ax.set_ylabel("False discovery rate")
+    ax.set_ylabel("F1 score")
     ax.set_xscale("log")
-    ax.set_yscale("log")
+    ax.set_ylim(0.4, 1.05)
     ax.legend(fontsize=8, frameon=False)
-    ax.set_title("FDR vs privacy budget")
 
     fig.suptitle(
         f"Privacy-utility tradeoff  "
-        f"($N={n_individuals}$, $M_{{SNP}}={n_snps}$, $M_{{causal}}={n_causal}$ causal SNPs, $n={n_centers}$ centers)",
+        f"($N={n_individuals}$, $M_{{SNP}}={n_snps}$, $M_{{causal}}={n_causal}$, $n={n_centers}$)",
         fontsize=11,
     )
     fig.tight_layout()
@@ -186,6 +252,11 @@ def experiment1_privacy_utility(
         epsilons=epsilons, power_gm=power_gm, power_am=power_am,
         fdr_gm=fdr_gm, fdr_am=fdr_am,
         oracle_power=oracle_p, single_power=single_p, eps_crit=eps_crit,
+        eps_crit_f1=eps_crit_f1,
+        nodp_power_gm=nodp_p_gm,
+        nodp_power_am=nodp_p_am,
+        nodp_f1_gm=nodp_f1_gm_m,
+        nodp_f1_am=nodp_f1_am_m,
     )
 
 
@@ -203,7 +274,8 @@ def experiment2_three_way(
     seed: int = 2,
 ) -> dict:
     """
-    Compare three methods across varying total cohort sizes.
+    Compare oracle, single-site, DP-distributed, and no-DP distributed
+    (``K=1``, ``epsilon=np.inf``) across varying total cohort sizes.
     Shows the regimes where DP-distributed recovers near-oracle performance
     and where single-site fails.
     """
@@ -226,12 +298,22 @@ def experiment2_three_way(
                 topology="complete", seed=seed + rep * 100,
             )
             m_gm = evaluate_gwas(dp_res.selected_gm, causal_idx, n_snps)
+            nodp_res = run_dp_gwas_mle(
+                centers,
+                epsilon=np.inf,
+                alpha=ALPHA_GWAS,
+                K=1,
+                topology="complete",
+                seed=seed + rep * 100,
+            )
+            m_nodp = evaluate_gwas(nodp_res.selected_gm, causal_idx, n_snps)
 
             rows.append(dict(
                 n=n,
                 oracle_power=oracle["power"], oracle_fdr=oracle["fdr"],
                 single_power=single["power"], single_fdr=single["fdr"],
                 dp_power=m_gm["power"], dp_fdr=m_gm["fdr"],
+                nodp_power=m_nodp["power"], nodp_fdr=m_nodp["fdr"],
             ))
 
     import pandas as pd
@@ -241,10 +323,25 @@ def experiment2_three_way(
     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
 
     N = np.array(n_individuals_list, dtype=int)
-    col_o, col_d, col_s = ("oracle_power", "dp_power", "single_power")
+    col_o, col_d, col_s, col_n = (
+        "oracle_power",
+        "dp_power",
+        "single_power",
+        "nodp_power",
+    )
     ax.errorbar(N, agg[(col_o, "mean")], yerr=agg[(col_o, "sem")], marker="o", label="Centralized", linewidth=1.5)
-    ax.errorbar(N, agg[(col_d, "mean")], yerr=agg[(col_d, "sem")], marker="s", label=f"DP-distributed ($\epsilon={epsilon}$)", linewidth=1.5)
-    ax.errorbar(N, agg[(col_s, "mean")], yerr=agg[(col_s, "sem")], marker="^", label="Single center", linewidth=1.5, linestyle="--")
+    ax.errorbar(N, agg[(col_d, "mean")], yerr=agg[(col_d, "sem")], marker="s", label=f"Distributed ($\epsilon={epsilon}$)", linewidth=1.5)
+    ax.errorbar(N, agg[(col_s, "mean")], yerr=agg[(col_s, "sem")], marker="^", label="Single-site", linewidth=1.5, linestyle="--")
+    ax.errorbar(
+        N,
+        agg[(col_n, "mean")],
+        yerr=agg[(col_n, "sem")],
+        marker="D",
+        color="#ba7517",
+        label="No DP",
+        linewidth=1.5,
+        linestyle=(0, (3, 1, 1, 1)),
+    )
     ax.set_xlabel("Total cohort size ($N$)")
     ax.set_ylabel("Statistical power")
     ax.set_ylim(0, 1.05)
@@ -341,7 +438,7 @@ def experiment3_topology(
     ax.set_title("Power by topology")
     for bar, sl in zip(bars, slem_vals):
         ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                f"$1 - |\\lambda_2| = {sl:.2f}$", ha="center", fontsize=8, rotation=45)
+                f"$1 - |\\lambda_2| = {sl:.2f}$", ha="center", fontsize=8, rotation=90)
 
     # Spectral gap vs convergence iteration
     ax = axes[2]
@@ -450,26 +547,24 @@ def experiment4_stratified(
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     ax = axes[0]
-    ax.plot(h2_vals, h2_power_oracle, "o-", label="Oracle", linewidth=1.5)
-    ax.plot(h2_vals, h2_power_dp,     "s-", label=f"DP-GWAS ($\epsilon={epsilon}$)", linewidth=1.5)
-    ax.plot(h2_vals, h2_power_single,  "^--", label="Single center", linewidth=1.5)
+    ax.plot(h2_vals, h2_power_oracle, "o-", label="Centralized", linewidth=1.5)
+    ax.plot(h2_vals, h2_power_dp,     "s-", label=f"Distributed ($\epsilon={epsilon}$)", linewidth=1.5)
+    ax.plot(h2_vals, h2_power_single,  "^--", label="Single-site", linewidth=1.5)
     ax.set_xlabel("Heritability (h²)")
     ax.set_ylabel("Statistical power")
     ax.set_ylim(0, 1.05)
     ax.legend(fontsize=8, frameon=False)
-    ax.set_title("Power vs heritability")
 
     ax = axes[1]
     x = np.arange(len(maf_labels))
     w = 0.35
-    ax.bar(x - w/2, power_by_maf_oracle, w, label="Oracle")
-    ax.bar(x + w/2, power_by_maf_dp,     w, label=f"DP-GWAS ($\epsilon={epsilon}$)")
+    ax.bar(x - w/2, power_by_maf_oracle, w, label="Centralized")
+    ax.bar(x + w/2, power_by_maf_dp,     w, label=f"Distributed ($\epsilon={epsilon}$)")
     ax.set_xticks(x)
     ax.set_xticklabels(maf_labels, rotation=15, fontsize=8)
     ax.set_ylabel("Statistical power")
     ax.set_ylim(0, 1.1)
     ax.legend(fontsize=8, frameon=False)
-    ax.set_title("Power by minor allele frequency bin")
 
     fig.suptitle(
         f"Heritability & MAF strata  ($N={n_individuals}$, $n={n_centers}$)",
@@ -686,8 +781,9 @@ def experiment_gwas_metrics_vs_epsilon(
 ) -> dict:
     """
     Plot all metrics returned by ``evaluate_gwas`` (power, FDR, F1, FPR)
-    as a function of ε, for both GM and AM DP-GWAS.  Oracle and single-center
-    baselines are horizontal reference lines (noise-free, averaged over reps).
+    as a function of ε, for both GM and AM DP-GWAS.  Oracle, single-center,
+    and no-DP distributed (``K=1``, ``epsilon=np.inf``) baselines are horizontal
+    reference lines (averaged over reps).
     """
     if epsilons is None:
         epsilons = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
@@ -703,6 +799,8 @@ def experiment_gwas_metrics_vs_epsilon(
 
     oracle_rows: list[dict] = []
     single_rows: list[dict] = []
+    nodp_gm_rows: list[dict] = []
+    nodp_am_rows: list[dict] = []
 
     for rep in range(n_reps):
         data = simulate_gwas_data(n_individuals, n_snps, n_causal, seed=seed + rep)
@@ -713,6 +811,21 @@ def experiment_gwas_metrics_vs_epsilon(
         single = single_center_gwas(centers, alpha=ALPHA_GWAS)
         oracle_rows.append({k: oracle[k] for k in metric_keys})
         single_rows.append({k: single[k] for k in metric_keys})
+
+        nodp = run_dp_gwas_mle(
+            centers,
+            epsilon=np.inf,
+            alpha=ALPHA_GWAS,
+            K=1,
+            topology="complete",
+            seed=seed + rep * 100,
+        )
+        nodp_gm_rows.append(
+            {k: evaluate_gwas(nodp.selected_gm, causal_idx, n_snps)[k] for k in metric_keys}
+        )
+        nodp_am_rows.append(
+            {k: evaluate_gwas(nodp.selected_am, causal_idx, n_snps)[k] for k in metric_keys}
+        )
 
         for eps in epsilons:
             res = run_dp_gwas_mle(
@@ -742,6 +855,8 @@ def experiment_gwas_metrics_vs_epsilon(
 
     oracle_mean = {k: mean([r[k] for r in oracle_rows]) for k in metric_keys}
     single_mean = {k: mean([r[k] for r in single_rows]) for k in metric_keys}
+    nodp_gm_mean = {k: mean([r[k] for r in nodp_gm_rows]) for k in metric_keys}
+    nodp_am_mean = {k: mean([r[k] for r in nodp_am_rows]) for k in metric_keys}
 
     fig, axes = plt.subplots(1, 2, figsize=(8, 4), squeeze=False, sharey=True)
     panels = [
@@ -759,7 +874,7 @@ def experiment_gwas_metrics_vs_epsilon(
             gm_m,
             yerr=gm_s,
             marker="o",
-            label="DP-GWAS (GM)",
+            label="Distributed (GM)",
             capsize=3,
             linewidth=1.5,
         )
@@ -768,7 +883,7 @@ def experiment_gwas_metrics_vs_epsilon(
             am_m,
             yerr=am_s,
             marker="s",
-            label="DP-GWAS (AM)",
+            label="Distributed (AM)",
             capsize=3,
             linewidth=1.5,
             linestyle="--",
@@ -786,6 +901,21 @@ def experiment_gwas_metrics_vs_epsilon(
             linestyle="-.",
             linewidth=1.2,
             label="Single center",
+        )
+        ax.axhline(
+            nodp_gm_mean[key],
+            color="#ba7517",
+            linestyle=(0, (3, 1, 1, 1)),
+            linewidth=1.35,
+            label="No DP (GM)",
+        )
+        ax.axhline(
+            nodp_am_mean[key],
+            color="#ba7517",
+            linestyle=(0, (1, 1)),
+            linewidth=1.15,
+            alpha=0.85,
+            label="No DP (AM)",
         )
         if key == "fdr":
             ax.axhline(
@@ -817,6 +947,8 @@ def experiment_gwas_metrics_vs_epsilon(
         epsilons=epsilons,
         oracle_mean=oracle_mean,
         single_mean=single_mean,
+        nodp_gm_mean=nodp_gm_mean,
+        nodp_am_mean=nodp_am_mean,
         **agg,
     )
 
@@ -838,8 +970,8 @@ def experiment_gwas_metrics_vs_n_centers(
     Same metrics as ``experiment_gwas_metrics_vs_epsilon``, but sweep the number
     of centers with a fixed privacy budget.  One dataset is simulated per
     replicate; the oracle (pooled GWAS) is therefore constant across ``n`` for
-    that replicate and shown as a horizontal reference.  Single-center and DP
-    curves vary with ``n``.
+    that replicate and shown as a horizontal reference.  Single-center, DP,
+    and no-DP distributed (``K=1``, ``epsilon=np.inf``) curves vary with ``n``.
     """
     if n_centers_list is None:
         n_centers_list = [2, 3, 5, 8, 10, 15, 20]
@@ -853,6 +985,10 @@ def experiment_gwas_metrics_vs_n_centers(
             results[nc][f"{m}_am"] = []
 
     single_results: dict = {nc: {k: [] for k in metric_keys} for nc in n_centers_list}
+    nodp_results: dict = {
+        nc: {**{f"{m}_gm": [] for m in metric_keys}, **{f"{m}_am": [] for m in metric_keys}}
+        for nc in n_centers_list
+    }
     oracle_rows: list[dict] = []
 
     for rep in range(n_reps):
@@ -884,6 +1020,20 @@ def experiment_gwas_metrics_vs_n_centers(
                 results[nc][f"{k}_gm"].append(m_gm[k])
                 results[nc][f"{k}_am"].append(m_am[k])
 
+            nodp = run_dp_gwas_mle(
+                centers,
+                epsilon=np.inf,
+                alpha=ALPHA_GWAS,
+                K=1,
+                topology="complete",
+                seed=seed + rep * 1000 + nc,
+            )
+            m_n_gm = evaluate_gwas(nodp.selected_gm, causal_idx, n_snps)
+            m_n_am = evaluate_gwas(nodp.selected_am, causal_idx, n_snps)
+            for k in metric_keys:
+                nodp_results[nc][f"{k}_gm"].append(m_n_gm[k])
+                nodp_results[nc][f"{k}_am"].append(m_n_am[k])
+
     n_arr = np.array(n_centers_list, dtype=float)
     mean = lambda lst: float(np.mean(lst))
     se = lambda lst: float(np.std(lst) / np.sqrt(max(len(lst), 1)))
@@ -894,6 +1044,18 @@ def experiment_gwas_metrics_vs_n_centers(
         agg[f"{k}_am_mean"] = [mean(results[nc][f"{k}_am"]) for nc in n_centers_list]
         agg[f"{k}_gm_se"] = [se(results[nc][f"{k}_gm"]) for nc in n_centers_list]
         agg[f"{k}_am_se"] = [se(results[nc][f"{k}_am"]) for nc in n_centers_list]
+        agg[f"nodp_{k}_gm_mean"] = [
+            mean(nodp_results[nc][f"{k}_gm"]) for nc in n_centers_list
+        ]
+        agg[f"nodp_{k}_am_mean"] = [
+            mean(nodp_results[nc][f"{k}_am"]) for nc in n_centers_list
+        ]
+        agg[f"nodp_{k}_gm_se"] = [
+            se(nodp_results[nc][f"{k}_gm"]) for nc in n_centers_list
+        ]
+        agg[f"nodp_{k}_am_se"] = [
+            se(nodp_results[nc][f"{k}_am"]) for nc in n_centers_list
+        ]
 
     oracle_mean = {k: mean([r[k] for r in oracle_rows]) for k in metric_keys}
     single_mean_per_n = {
@@ -934,6 +1096,29 @@ def experiment_gwas_metrics_vs_n_centers(
             capsize=3,
             linewidth=1.5,
             linestyle="--",
+        )
+        ax.errorbar(
+            n_arr,
+            agg[f"nodp_{key}_gm_mean"],
+            yerr=agg[f"nodp_{key}_gm_se"],
+            marker="D",
+            color="#ba7517",
+            label="No DP (GM)",
+            capsize=3,
+            linewidth=1.35,
+            linestyle=(0, (3, 1, 1, 1)),
+        )
+        ax.errorbar(
+            n_arr,
+            agg[f"nodp_{key}_am_mean"],
+            yerr=agg[f"nodp_{key}_am_se"],
+            marker="d",
+            color="#ba7517",
+            label="No DP (AM)",
+            capsize=3,
+            linewidth=1.2,
+            linestyle=(0, (1, 1)),
+            alpha=0.85,
         )
         ax.axhline(
             oracle_mean[key],

@@ -24,6 +24,57 @@ import networkx as nx
 # Data simulation
 # ---------------------------------------------------------------------------
 
+def simulate_gwas_data(
+    n_individuals: int,
+    n_snps: int,
+    n_causal: int,
+    maf_range: tuple[float, float] = (0.05, 0.5),
+    h2: float = 0.3,
+    binary_trait: bool = False,
+    prevalence: float = 0.3,
+    seed: int = 42,
+    odds_ratio: np.ndarray = None,
+) -> dict:
+    """
+    Simulate GWAS genotype + phenotype data under a polygenic model.
+
+    Returns
+    -------
+    dict with keys:
+        G_std      : (n, M) standardised genotype matrix
+        y          : (n,) phenotype vector
+        beta       : (M,) true effect sizes (zero for non-causal)
+        causal_idx : (n_causal,) indices of causal SNPs
+        mafs       : (M,) minor allele frequencies
+    """
+    rng = np.random.default_rng(seed)
+    mafs = rng.uniform(*maf_range, size=n_snps)
+
+    G = rng.binomial(2, mafs, size=(n_individuals, n_snps))
+
+    col_std = np.sqrt(2 * mafs * (1 - mafs))
+    col_std = np.where(col_std < 1e-8, 1.0, col_std)
+    G_std = (G - 2 * mafs) / col_std
+
+    causal_idx = rng.choice(n_snps, n_causal, replace=False)
+    beta = np.zeros(n_snps)
+    per_snp_var = h2 / n_causal
+    beta[causal_idx] = rng.normal(0, np.sqrt(per_snp_var), size=n_causal)
+
+    linear_pred = G_std @ beta
+
+    if binary_trait:
+        prob = 1 / (1 + np.exp(-linear_pred))
+        rescale = prevalence / prob.mean()
+        prob = np.clip(prob * rescale, 0, 1)
+        y = rng.binomial(1, prob).astype(float)
+    else:
+        env_noise = rng.normal(0, np.sqrt(max(1.0 - h2, 1e-6)), size=n_individuals)
+        y = linear_pred + env_noise
+
+    return dict(G_std=G_std, y=y, beta=beta, causal_idx=causal_idx, mafs=mafs)
+
+
 
 def split_data_across_centers(
     data: dict,
@@ -65,10 +116,49 @@ def split_data_across_centers(
 # Score statistics & log-likelihoods
 # ---------------------------------------------------------------------------
 
+def score_stats_precompute(y: np.ndarray, binary: bool = False) -> dict:
+    """
+    Per-center phenotype summaries for score tests (reuse across SNP chunks).
+
+    Passing the returned dict to :func:`compute_score_stats` avoids recomputing
+    ``y.mean()``, ``var(y)``, etc. when scanning genome-wide data in blocks.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    n = int(y.shape[0])
+    if not binary:
+        y_centered = y - y.mean()
+        sigma2 = float(np.var(y_centered))
+        if sigma2 <= 0.0:
+            sigma2 = 1e-12
+        return {"binary": False, "n": n, "y_centered": y_centered, "sigma2": sigma2}
+    mu0 = float(y.mean())
+    w = mu0 * (1.0 - mu0)
+    if w <= 0.0:
+        w = 1e-12
+    resid = y - mu0
+    return {"binary": True, "n": n, "resid": resid, "w": w}
+
+
+def _score_stats_from_precomputed(G_std: np.ndarray, pre: dict) -> np.ndarray:
+    """Per-SNP log-LR (score/2) from genotype block and precomputed phenotype stats."""
+    n, _M = G_std.shape
+    if n != pre["n"]:
+        raise ValueError("G_std row count does not match precomputed n")
+    if not pre["binary"]:
+        dot = G_std.T @ pre["y_centered"]
+        score = (dot ** 2) / (n * pre["sigma2"])
+    else:
+        dot = G_std.T @ pre["resid"]
+        score = (dot ** 2) / (n * pre["w"])
+    return score / 2.0
+
+
 def compute_score_stats(
     G_std: np.ndarray,
     y: np.ndarray,
     binary: bool = False,
+    *,
+    precomputed: dict | None = None,
 ) -> np.ndarray:
     """
     Return per-SNP score test statistics (log-likelihood ratio approximation).
@@ -79,26 +169,9 @@ def compute_score_stats(
     Both are O(n * M) and exact under the respective null models.
     Returns array of shape (M,) — one value per SNP.
     """
-    n, M = G_std.shape
-    y_centered = y - y.mean()
-
-    if not binary:
-        # Score = (G_j^T y_c)^2 / (n * sigma2_hat)
-        # log-LR approximation: score_stat / 2  (chi^2_1 / 2)
-        dot = G_std.T @ y_centered          # (M,)
-        sigma2 = np.var(y_centered)
-        score = (dot ** 2) / (n * sigma2)   # chi^2_1 under H0
-        log_llr = score / 2.0               # log p(data|H1) - log p(data|H0)
-    else:
-        # Under logistic null (intercept only), mu = mean(y)
-        mu0 = y.mean()
-        w = mu0 * (1 - mu0)
-        resid = y - mu0
-        dot = G_std.T @ resid               # (M,)
-        score = (dot ** 2) / (n * w)        # Rao score stat ~ chi^2_1
-        log_llr = score / 2.0
-
-    return log_llr
+    if precomputed is None:
+        precomputed = score_stats_precompute(y, binary)
+    return _score_stats_from_precomputed(G_std, precomputed)
 
 
 def sensitivity_score_stat(n_i: int, binary: bool = False) -> float:
@@ -163,84 +236,53 @@ def laplace_noise_log_belief(
     return lb_noisy - lse
 
 
+def _log_linear_update_tensor(log_belief_tensor: np.ndarray, A: np.ndarray) -> np.ndarray:
+    """
+    One synchronous log-linear update for all centers.
+
+    Parameters
+    ----------
+    log_belief_tensor : (n_centers, M, n_states)
+    A                 : (n_centers, n_centers) doubly stochastic
+
+    Returns
+    -------
+    Updated tensor of shape (n_centers, M, n_states), row-normalised in log-space.
+    """
+    n, M, S = log_belief_tensor.shape
+    flat = log_belief_tensor.reshape(n, M * S)
+    log_nu_raw = (A @ flat).reshape(n, M, S)
+    log_nu_raw = np.clip(log_nu_raw, -700.0, 700.0)
+    lse = logsumexp(log_nu_raw, axis=2, keepdims=True)
+    return log_nu_raw - lse
+
+
+def log_linear_update_all(log_belief_tensor: np.ndarray, A: np.ndarray) -> np.ndarray:
+    """
+    Vectorised log-linear belief step for all centers (BLAS-friendly for large M).
+
+    ``log_belief_tensor`` has shape ``(n_centers, M, n_states)``.  Applies one
+    synchronous Jacobi update and row-normalises in log-space.
+    """
+    return _log_linear_update_tensor(log_belief_tensor, A)
+
+
 def log_linear_update(
     log_beliefs: list[np.ndarray],
     A: np.ndarray,
     center_idx: int,
 ) -> np.ndarray:
-    """
-    Compute one step of the log-linear (geometric mean) belief update
-    for a single center, fully in log-space.
-
-    Equation (12) from Papachristou & Rahimian (2025):
-
-        nu_i,t(theta) ∝ nu_i,t-1(theta)^(1+a_ii)
-                        * prod_{j in N_i} nu_j,t-1(theta)^a_ij
-
-    In log-space this is a *weighted sum* of log-beliefs:
-
-        log_nu_raw[j,s] = (1+a_ii)*log_nu_i[j,s]
-                         + sum_{k != i} a_ik * log_nu_k[j,s]
-
-    However, because each log_nu_k is already normalised (logsumexp = 0),
-    adding (1 + a_ii) times it rather than a_ii times it grows the
-    magnitude without bound over many iterations.
-
-    The stable formulation rewrites the exponent as:
-
-        weight_i = 1 + a_ii,   weight_k = a_ik  for k != i
-
-    These weights sum to 1 + a_ii + sum_{k!=i} a_ik = 1 + 1 = 2.
-    So the weighted sum has logsumexp ≈ log(2), not 0 — meaning
-    the beliefs do NOT remain on the unit simplex directly.
-
-    The correct implementation follows the paper: after the weighted
-    combination, we renormalise to the simplex.  The key insight is
-    that normalisation happens AFTER the weighted sum, so the (1+a_ii)
-    self-weight is equivalent to the agent giving extra weight to its own
-    prior — the final normalisation restores the simplex constraint.
-
-    To avoid unbounded growth over T iterations, we clip the raw
-    weighted sum to [-700, 700] before normalising (which corresponds
-    to probability ratios up to exp(700) ≈ 10^304 — effectively a
-    hard 0/1 decision, which is the correct asymptotic behaviour).
-
-    Parameters
-    ----------
-    log_beliefs : list of (M, n_states) arrays, one per center,
-                  each normalised so logsumexp(axis=1) = 0
-    A           : (n, n) doubly stochastic adjacency matrix
-    center_idx  : which center to update
-
-    Returns
-    -------
-    (M, n_states) updated log-belief, normalised so logsumexp(axis=1) = 0
-    """
-    n = len(log_beliefs)
-    M, S = log_beliefs[center_idx].shape
-
-    # Weighted sum in log-space with (1 + a_ii) self-weight
-    log_nu_raw = np.zeros((M, S))
-    for k in range(n):
-        w = A[center_idx, k]
-        if k == center_idx:
-            w = 1.0 + A[center_idx, k]
-        if w > 1e-12:
-            log_nu_raw += w * log_beliefs[k]
-
-    # Clip to prevent overflow before normalisation
-    log_nu_raw = np.clip(log_nu_raw, -700.0, 700.0)
-
-    # Normalise to unit simplex in log-space
-    lse = logsumexp(log_nu_raw, axis=1, keepdims=True)
-    return log_nu_raw - lse
+    """Update a single center's log-beliefs (wraps :func:`log_linear_update_all`)."""
+    L = np.stack(log_beliefs, axis=0)
+    out = _log_linear_update_tensor(L, A)
+    return np.ascontiguousarray(out[center_idx])
 
 
 # ---------------------------------------------------------------------------
 # Communication matrix constructors
 # ---------------------------------------------------------------------------
 
-def make_adjacency(n: int, topology: str = "complete", seed: int = 0) -> np.ndarray:
+def make_adjacency(n: int, topology: str = "complete", seed: int = 0, add_I=False) -> np.ndarray:
     """
     Build a doubly stochastic adjacency matrix for n agents.
 
@@ -292,6 +334,9 @@ def make_adjacency(n: int, topology: str = "complete", seed: int = 0) -> np.ndar
         A = _metropolis_hastings(adj)
     else:
         raise ValueError(f"Unknown topology: {topology}")
+
+    if add_I:
+        A = A + np.eye(n)
 
     return A
 
@@ -355,6 +400,8 @@ def run_dp_gwas_mle(
     track_convergence: bool = True,
     convergence_tol: float = 1e-4,
     seed: int = 0,
+    snp_chunk_size: int | None = None,
+    convergence_tv_max_snps: int | None = None,
 ) -> DPGWASResult:
     """
     Run differentially private distributed GWAS via log-linear belief updates
@@ -375,12 +422,28 @@ def run_dp_gwas_mle(
 
     This separates MLE identification (Stage 2) from hypothesis testing
     (Stage 1), matching Proposition 1 of the paper.
+
+    Scaling
+    -------
+    ``snp_chunk_size`` processes SNPs in blocks so peak memory stays
+    ``O(n_centers * chunk * n_states)`` for belief tensors instead of
+    ``O(n_centers * M * n_states)``. Score statistics for each block are
+    computed once per center and reused across all ``K`` privacy rounds
+    (the noise is still drawn every round).
+
+    Setting ``convergence_tv_max_snps`` caps how many SNPs enter the TV
+    diagnostic (useful when ``M`` is huge). ``None`` uses all SNPs in the
+    current chunk (same as legacy behaviour for a single full chunk).
+
+    Note: chunking changes the order in which pseudo-random noise is drawn,
+    so results are not bitwise-identical to an all-at-once run with the
+    same ``seed`` (the underlying DP mechanism is unchanged).
     """
     n_centers = len(centers_data)
     M = centers_data[0]["G_std"].shape[1]
     n_states = 2
 
-    A = make_adjacency(n_centers, topology=topology, seed=seed)
+    A = make_adjacency(n_centers, topology=topology, seed=seed, add_I=True)
 
     if T is None:
         slem = 1.0 - spectral_gap(A)
@@ -393,66 +456,92 @@ def run_dp_gwas_mle(
         for c in centers_data
     ]
 
-    belief_trace = []
+    pres = [score_stats_precompute(c["y"], binary_trait) for c in centers_data]
+
+    chunk_size = M if snp_chunk_size is None else int(snp_chunk_size)
+    if chunk_size < 1:
+        raise ValueError("snp_chunk_size must be >= 1")
+    chunk_size = min(chunk_size, M)
+
+    belief_trace: list[float] = []
     converged_at = T * K
-    round_final_log_beliefs = []
-    noisy_stat_rounds = []
+    noisy_stat_sum = np.zeros(M, dtype=np.float64)
+    gm_accum = np.zeros((M, n_states), dtype=np.float64)
+    log_prob_am_merged = np.empty((M, n_states), dtype=np.float64)
 
-    for k in range(K):
-        rng_k = np.random.default_rng(seed * 10000 + k)
+    for j0 in range(0, M, chunk_size):
+        j1 = min(j0 + chunk_size, M)
+        sl = slice(j0, j1)
+        B = j1 - j0
 
-        # Stage 1: accumulate noisy sum of score statistics
-        noisy_sum_k = np.zeros(M)
+        llr_block = np.stack(
+            [
+                _score_stats_from_precomputed(centers_data[ic]["G_std"][:, sl], pres[ic])
+                for ic in range(n_centers)
+            ],
+            axis=0,
+        )
 
-        # Stage 2: initialise noisy log-beliefs for consensus
-        log_beliefs = []
-        for i, cdata in enumerate(centers_data):
-            log_llr_i = compute_score_stats(cdata["G_std"], cdata["y"], binary=binary_trait)
-            delta_i = sensitivities[i]
-            noise_scale = delta_i * K * n_states / epsilon
+        am_chunk: np.ndarray | None = None
+        for k in range(K):
+            rng_k = np.random.default_rng(seed * 10000 + k)
+            belief_rows = []
+            noisy_chunk = np.zeros(B, dtype=np.float64)
+            for i, cdata in enumerate(centers_data):
+                delta_i = sensitivities[i]
+                noise_scale = delta_i * K * n_states / epsilon
+                llr_i = llr_block[i]
+                noisy_chunk += llr_i + rng_k.laplace(0.0, noise_scale, B)
+                lb_i = log_belief_init(llr_i)
+                lb_noisy = laplace_noise_log_belief(
+                    lb_i, delta_i, epsilon, n_states, K, rng_k
+                )
+                belief_rows.append(lb_noisy)
 
-            # Stage 1 accumulator
-            noisy_sum_k += log_llr_i + rng_k.laplace(0.0, noise_scale, M)
+            noisy_stat_sum[sl] += noisy_chunk
+            belief_tensor = np.stack(belief_rows, axis=0)
 
-            # Stage 2 log-belief
-            lb_i = log_belief_init(log_llr_i)
-            lb_noisy = laplace_noise_log_belief(lb_i, delta_i, epsilon, n_states, K, rng_k)
-            log_beliefs.append(lb_noisy)
+            for t in range(T):
+                belief_tensor = _log_linear_update_tensor(belief_tensor, A)
 
-        noisy_stat_rounds.append(noisy_sum_k)
+                if track_convergence and k == 0 and j0 == 0:
+                    n_tv = B if convergence_tv_max_snps is None else min(
+                        B, int(convergence_tv_max_snps)
+                    )
+                    lbr = belief_tensor[:, :n_tv, 1] - belief_tensor[:, :n_tv, 0]
+                    tv = float(np.std(lbr))
+                    belief_trace.append(tv)
+                    if tv < convergence_tol and converged_at == T * K:
+                        converged_at = t
 
-        # Stage 2: T iterations of log-linear updates
-        for t in range(T):
-            log_beliefs = [log_linear_update(log_beliefs, A, i) for i in range(n_centers)]
+            gm_accum[sl] += belief_tensor.mean(axis=0)
+            ls_round = logsumexp(belief_tensor, axis=0)
+            if am_chunk is None:
+                am_chunk = ls_round
+            else:
+                am_chunk = logsumexp(
+                    np.stack([am_chunk, ls_round], axis=0), axis=0
+                )
 
-            if track_convergence and k == 0:
-                lbr = np.array([lb[:, 1] - lb[:, 0] for lb in log_beliefs])
-                tv = float(np.std(lbr))
-                belief_trace.append(tv)
-                if tv < convergence_tol and converged_at == T * K:
-                    converged_at = t
-
-        round_final_log_beliefs.append(np.array(log_beliefs))
+        log_prob_am_merged[sl] = am_chunk
 
     # -----------------------------------------------------------------------
     # Stage 1: calibrated p-values
     # Under H0: 2 * sum_i Lambda_i ~ chi2_{n_centers}
     # -----------------------------------------------------------------------
-    agg_stat = np.mean(noisy_stat_rounds, axis=0)          # (M,)
+    agg_stat = noisy_stat_sum / float(K)
     chi2_agg = np.clip(2.0 * agg_stat, 0.0, None)
     pvalues = chi2.sf(chi2_agg, df=n_centers)
 
     # -----------------------------------------------------------------------
     # Stage 2: GM and AM belief aggregation
     # -----------------------------------------------------------------------
-    stacked = np.array(round_final_log_beliefs)             # (K, n, M, 2)
-
-    log_beliefs_gm = stacked.mean(axis=0).mean(axis=0)     # (M, 2)
+    log_beliefs_gm = gm_accum / float(K)
     lse = logsumexp(log_beliefs_gm, axis=1, keepdims=True)
     log_beliefs_gm = log_beliefs_gm - lse
     lbr_gm = log_beliefs_gm[:, 1] - log_beliefs_gm[:, 0]
 
-    log_prob_am = logsumexp(stacked, axis=(0, 1)) - np.log(K * n_centers)
+    log_prob_am = log_prob_am_merged - np.log(K * n_centers)
     lse2 = logsumexp(log_prob_am, axis=1, keepdims=True)
     log_prob_am = log_prob_am - lse2
     lbr_am = log_prob_am[:, 1] - log_prob_am[:, 0]
@@ -609,11 +698,7 @@ def run_rizk_baseline(
             grad[i] = g_clipped + noise
 
         # Consensus + gradient step
-        theta_new = np.zeros_like(theta)
-        for i in range(n_centers):
-            consensus = sum(A[i, j] * theta[j] for j in range(n_centers))
-            theta_new[i] = consensus + lr * grad[i]
-        theta = theta_new
+        theta = A @ theta + lr * grad
 
     # Average over centers
     theta_avg = theta.mean(axis=0)   # (M,)

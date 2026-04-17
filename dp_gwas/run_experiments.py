@@ -17,7 +17,7 @@ from pathlib import Path
 def run_stability_tests() -> bool:
     from dp_gwas_core import (
         log_belief_init, laplace_noise_log_belief,
-        log_linear_update, make_adjacency, sensitivity_score_stat,
+        log_linear_update_all, make_adjacency, sensitivity_score_stat,
     )
     from scipy.special import logsumexp
 
@@ -47,10 +47,11 @@ def run_stability_tests() -> bool:
     check("laplace noise: no NaN at ε=0.01", not np.any(np.isnan(lb_noisy)))
     check("laplace noise: normalised", np.allclose(logsumexp(lb_noisy, axis=1), 0, atol=1e-6))
 
-    log_beliefs = [log_belief_init(rng.normal(0, 0.5, 50)) for _ in range(5)]
+    L = np.stack([log_belief_init(rng.normal(0, 0.5, 50)) for _ in range(5)], axis=0)
     A = make_adjacency(5, "complete")
     for _ in range(200):
-        log_beliefs = [log_linear_update(log_beliefs, A, i) for i in range(5)]
+        L = log_linear_update_all(L, A)
+    log_beliefs = [L[i] for i in range(5)]
     max_lse = max(np.max(np.abs(logsumexp(lb, axis=1))) for lb in log_beliefs)
     check(f"200 iterations: normalisation drift < 1e-5 (got {max_lse:.2e})", max_lse < 1e-5)
     max_lb = max(np.max(lb) for lb in log_beliefs)
@@ -141,14 +142,18 @@ def main(fast: bool = False) -> None:
     print("SUMMARY")
     print("=" * 60)
     print(f"Exp 1 — ε*: {r1.get('eps_crit', 'N/A')}  "
-          f"Oracle power: {r1['oracle_power']:.3f}  Single-site: {r1['single_power']:.3f}")
+          f"Oracle power: {r1['oracle_power']:.3f}  Single-site: {r1['single_power']:.3f}  "
+          f"No-DP GM: {r1['nodp_power_gm']:.3f}")
 
     if "df" in r2:
         import pandas as pd
-        agg = r2["df"].groupby("n")[["oracle_power", "dp_power", "single_power"]].mean()
+        agg = r2["df"].groupby("n")[
+            ["oracle_power", "dp_power", "single_power", "nodp_power"]
+        ].mean()
         row = agg.iloc[-1]
         print(f"Exp 2 — n={agg.index.max()}: Oracle={row['oracle_power']:.3f}  "
-              f"DP={row['dp_power']:.3f}  Single={row['single_power']:.3f}")
+              f"DP={row['dp_power']:.3f}  Single={row['single_power']:.3f}  "
+              f"No-DP={row['nodp_power']:.3f}")
 
     print(f"Exp 5 — centers {r5['n_centers_list']}: powers {[f'{p:.2f}' for p in r5['powers']]}")
 
@@ -175,6 +180,7 @@ def main(fast: bool = False) -> None:
     r7b = r7["r7b"]
     print(f"\nExp 7 — NYC network ({len(r7['hospitals'])} hospitals):")
     print(f"  ε* ≈ {r7b['eps_crit']}  Oracle power: {r7b['oracle_power']:.3f}  "
+          f"No-DP GM: {r7b['nodp_power_gm']:.3f}  "
           f"Best hospital: {r7b['best_hospital'][:40]}")
     for top_name, v in r7["r7a"].items():
         print(f"  Topology {top_name:15s}: power={np.mean(v['power']):.3f}  gap={v['sg']:.3f}")
