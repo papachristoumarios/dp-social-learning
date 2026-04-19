@@ -25,6 +25,7 @@ import matplotlib.gridspec as gridspec
 from pathlib import Path
 from scipy.special import expit
 import time
+import os
 
 from dp_gwas_core import (
     simulate_gwas_data,
@@ -37,9 +38,6 @@ from dp_gwas_core import (
     spectral_gap,
     make_adjacency,
 )
-
-OUT = Path("../figures")
-OUT.mkdir(exist_ok=True)
 
 # Shared style
 plt.rcParams.update({
@@ -67,6 +65,7 @@ def experiment1_privacy_utility(
     n_reps: int = 3,
     epsilons: list[float] | None = None,
     seed: int = 1,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Sweep epsilon in [0.05, 5].  For each epsilon, run DP-GWAS (GM + AM)
@@ -88,7 +87,6 @@ def experiment1_privacy_utility(
                      "power_am": [], "fdr_am": [], "f1_am": []}
                for eps in epsilons}
 
-    
 
     # Oracle, single-site, and no-DP distributed benchmarks (computed once per rep)
     oracle_power, oracle_fdr, oracle_f1 = [], [], []
@@ -244,7 +242,7 @@ def experiment1_privacy_utility(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp1_privacy_utility.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp1_privacy_utility.pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"  → saved exp1_privacy_utility.pdf  (ε* ≈ {eps_crit})")
 
@@ -352,7 +350,7 @@ def experiment2_three_way(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp2_three_way.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp2_three_way.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("  → saved exp2_three_way.pdf")
     return dict(df=df)
@@ -366,6 +364,7 @@ def experiment3_topology(
     T: int = 150,
     n_reps: int = 3,
     seed: int = 3,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Compare convergence speed and final power across network topologies.
@@ -459,7 +458,7 @@ def experiment3_topology(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp3_topology.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp3_topology.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("  → saved exp3_topology.pdf")
     return results
@@ -477,6 +476,7 @@ def experiment4_stratified(
     epsilon: float = 1.0,
     n_reps: int = 3,
     seed: int = 4,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Power stratified by (a) heritability h² and (b) minor allele frequency.
@@ -571,7 +571,7 @@ def experiment4_stratified(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp4_stratified.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp4_stratified.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("  → saved exp4_stratified.pdf")
     return dict(h2_vals=h2_vals, h2_power_oracle=h2_power_oracle,
@@ -590,6 +590,7 @@ def experiment5_scaling(
     epsilon: float = 1.0,
     n_reps: int = 3,
     seed: int = 5,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Fix total cohort size, vary n_centers from 2 to 20.
@@ -677,7 +678,7 @@ def experiment5_scaling(
 
     fig.suptitle(f"Scaling with $n$ centers ($N={n_individuals_total}$, $M_{{SNP}}={n_snps}$, $M_{{causal}}={n_causal}$, $\epsilon={epsilon}$)", fontsize=11)
     fig.tight_layout()
-    fig.savefig(OUT / "exp5_scaling.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp5_scaling.pdf"), bbox_inches="tight")
     print("  → saved exp5_scaling.pdf")
     return dict(n_centers_list=n_centers_list, powers=powers, fdrs=fdrs, comms=comms)
 
@@ -693,6 +694,7 @@ def experiment6_rizk_comparison(
     epsilons: list[float] | None = None,
     n_reps: int = 3,
     seed: int = 6,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Average total variation distance (TVD) between each method's selected set
@@ -760,7 +762,7 @@ def experiment6_rizk_comparison(
 
     fig.suptitle("TVD to oracle: DP-GWAS vs Rizk et al. 2023", fontsize=11)
     fig.tight_layout()
-    fig.savefig(OUT / "exp6_rizk_comparison.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp6_rizk_comparison.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("  → saved exp6_rizk_comparison.pdf")
     return all_results
@@ -778,6 +780,7 @@ def experiment_gwas_metrics_vs_epsilon(
     n_reps: int = 3,
     epsilons: list[float] | None = None,
     seed: int = 7,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Plot all metrics returned by ``evaluate_gwas`` (power, FDR, F1, FPR)
@@ -939,7 +942,7 @@ def experiment_gwas_metrics_vs_epsilon(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp_gwas_metrics_vs_epsilon.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp_gwas_metrics_vs_epsilon.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("  → saved exp_gwas_metrics_vs_epsilon.pdf")
 
@@ -965,6 +968,7 @@ def experiment_gwas_metrics_vs_n_centers(
     epsilon: float = 1.0,
     n_centers_list: list[int] | None = None,
     seed: int = 8,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Same metrics as ``experiment_gwas_metrics_vs_epsilon``, but sweep the number
@@ -1155,7 +1159,7 @@ def experiment_gwas_metrics_vs_n_centers(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp_gwas_metrics_vs_n_centers.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp_gwas_metrics_vs_n_centers.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("  → saved exp_gwas_metrics_vs_n_centers.pdf")
 
@@ -1180,6 +1184,7 @@ def experiment_posterior_gm_am(
     n_centers: int = 5,
     epsilon: float = 1.0,
     seed: int = 9,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Run DP-GWAS once and visualize Stage-2 posteriors for GM vs AM.
@@ -1270,7 +1275,7 @@ def experiment_posterior_gm_am(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp_posterior_gm_am.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp_posterior_gm_am.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("  → saved exp_posterior_gm_am.pdf")
 

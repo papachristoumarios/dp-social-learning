@@ -56,9 +56,7 @@ from dp_gwas_core import (
 )
 from scipy.stats import chi2
 import seaborn as sns
-
-OUT = Path("../figures")
-OUT.mkdir(exist_ok=True)
+        
 
 plt.rcParams.update({
     "font.size": 10,
@@ -225,6 +223,7 @@ def run_dp_gwas_custom_network(
     seed: int = 0,
     snp_chunk_size: int | None = None,
     convergence_tv_max_snps: int | None = None,
+    output_dir: str = "../figures", 
 ) -> dict:
     """
     Like run_dp_gwas_mle but accepts an arbitrary adjacency matrix A
@@ -474,7 +473,7 @@ def exp7a_network_topologies(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp7a_network_topologies.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7a_network_topologies.pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"    → saved exp7a_network_topologies.pdf")
     return results
@@ -494,6 +493,7 @@ def exp7b_privacy_utility(
     K: int = 15,
     n_reps: int = 3,
     seed: int = 71,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Privacy-utility tradeoff on the real NYC network.
@@ -656,7 +656,7 @@ def exp7b_privacy_utility(
         fontsize=10,
     )
     fig.tight_layout()
-    fig.savefig(OUT / "exp7b_privacy_utility_nyc.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7b_privacy_utility_nyc.pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"    → saved exp7b_privacy_utility_nyc.pdf  (ε* ≈ {eps_crit})")
     return dict(
@@ -686,6 +686,7 @@ def exp7c_per_hospital_convergence(
     T: int = 150,
     K: int = 5,
     seed: int = 72,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Track per-hospital belief evolution over iterations.
@@ -799,7 +800,7 @@ def exp7c_per_hospital_convergence(
         "Per-hospital belief convergence on NYC network",
         fontsize=11,
     )
-    fig.savefig(OUT / "exp7c_per_hospital_convergence.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7c_per_hospital_convergence.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("    → saved exp7c_per_hospital_convergence.pdf")
     return dict(hub_idx=hub_idx.tolist(), periph_idx=periph_idx.tolist(),
@@ -820,6 +821,7 @@ def exp7d_county_federation(
     K: int = 15,
     n_reps: int = 3,
     seed: int = 73,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Model the realistic regulatory scenario where hospitals primarily
@@ -934,7 +936,7 @@ def exp7d_county_federation(
         "($\Delta$ = counties that cannot detect signal independently)",
         fontsize=10,
     )
-    fig.savefig(OUT / "exp7d_county_federation.pdf", bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7d_county_federation.pdf"), bbox_inches="tight")
     plt.close(fig)
     print("    → saved exp7d_county_federation.pdf")
     return dict(
@@ -989,6 +991,7 @@ def _split_by_sizes(
 def run_experiment7(
     csv_path: str = "../datasets/us_hospital_locations.csv",
     fast: bool = False,
+    output_dir: str = "../figures", 
 ) -> dict:
     """Run all four sub-experiments for Exp 7."""
     print("\nExperiment 7: Realistic NYC hospital network GWAS")

@@ -8,6 +8,8 @@ and prints a summary table.  Also runs a numerical stability test suite first.
 import sys
 import numpy as np
 from pathlib import Path
+import argparse
+import os
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +80,9 @@ def run_stability_tests() -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
-def main(fast: bool = False) -> None:
+def main(args: argparse.Namespace) -> None:
+    size = args.size
+    os.makedirs(args.output_dir, exist_ok=True)
     ok = run_stability_tests()
     if not ok:
         print("\nAborting: stability tests failed.")
@@ -96,18 +100,18 @@ def main(fast: bool = False) -> None:
     )
     from dp_gwas_exp7_nyc import run_experiment7
 
-    if fast:
+    if size == 'small':
         cfg = dict(n_individuals=800, n_snps=200, n_causal=10, n_reps=2)
-        r1 = experiment1_privacy_utility(**cfg, epsilons=[0.1, 0.5, 1.0, 2.0])
-        r2 = experiment2_three_way(n_individuals_list=[400, 800], n_snps=200, n_causal=10, n_reps=2)
-        r3 = experiment3_topology(n_individuals=800, n_snps=200, n_causal=10, n_centers=4, n_reps=2, T=60)
-        r4 = experiment4_stratified(**cfg)
-        r5 = experiment5_scaling(n_individuals_total=800, n_snps=200, n_causal=10, n_reps=2)
+        r1 = experiment1_privacy_utility(**cfg, epsilons=[0.1, 0.5, 1.0, 2.0], output_dir=args.output_dir)
+        r2 = experiment2_three_way(n_individuals_list=[400, 800], n_snps=200, n_causal=10, n_reps=2, output_dir=args.output_dir)
+        r3 = experiment3_topology(n_individuals=800, n_snps=200, n_causal=10, n_centers=4, n_reps=2, T=60, output_dir=args.output_dir)
+        r4 = experiment4_stratified(**cfg, output_dir=args.output_dir)
+        r5 = experiment5_scaling(n_individuals_total=800, n_snps=200, n_causal=10, n_reps=2, output_dir=args.output_dir)
         r6 = experiment6_rizk_comparison(n_individuals=800, n_snps=200, n_causal=10,
-                                          n_centers_list=[3, 5], epsilons=[0.5, 1.0], n_reps=2)
-        r6b = experiment_gwas_metrics_vs_epsilon(**cfg, epsilons=[0.1, 0.5, 1.0, 2.0])
+                                          n_centers_list=[3, 5], epsilons=[0.5, 1.0], n_reps=2, output_dir=args.output_dir)
+        r6b = experiment_gwas_metrics_vs_epsilon(**cfg, epsilons=[0.1, 0.5, 1.0, 2.0], output_dir=args.output_dir)
         r6c = experiment_gwas_metrics_vs_n_centers(
-            **cfg, epsilon=1.0, n_centers_list=[2, 3, 5, 8],
+            **cfg, epsilon=1.0, n_centers_list=[2, 3, 5, 8], output_dir=args.output_dir
         )
         r9 = experiment_posterior_gm_am(
             n_individuals=cfg["n_individuals"],
@@ -115,28 +119,51 @@ def main(fast: bool = False) -> None:
             n_causal=cfg["n_causal"],
             n_centers=4,
             epsilon=1.0,
+            output_dir=args.output_dir
         )
-        r7 = run_experiment7(fast=True)
-    else:
-        r1 = experiment1_privacy_utility(n_individuals=25000, n_snps=600, n_causal=25, n_centers=5, n_reps=5)
-        r2 = experiment2_three_way(n_individuals_list=[500, 1000, 2000, 4000], n_snps=600, n_causal=25, n_centers=5, n_reps=4)
+        r7 = run_experiment7(size='small', output_dir=args.output_dir)
+    elif size == 'medium':
+        r1 = experiment1_privacy_utility(n_individuals=25000, n_snps=600, n_causal=25, n_centers=5, n_reps=5, output_dir=args.output_dir)
+        r2 = experiment2_three_way(n_individuals_list=[500, 1000, 2000, 4000], n_snps=600, n_causal=25, n_centers=5, n_reps=4, output_dir=args.output_dir)
         r3 = experiment3_topology(n_individuals=2500, n_snps=400, n_causal=20, n_centers=30, n_reps=3, T=200)
-        r4 = experiment4_stratified(n_individuals=3000, n_snps=600, n_causal=25, n_reps=4)
-        r5 = experiment5_scaling(n_individuals_total=3000, n_snps=400, n_causal=20, n_reps=3)
+        r4 = experiment4_stratified(n_individuals=3000, n_snps=600, n_causal=25, n_reps=4, output_dir=args.output_dir)
+        r5 = experiment5_scaling(n_individuals_total=3000, n_snps=400, n_causal=20, n_reps=3, output_dir=args.output_dir)
         r6 = experiment6_rizk_comparison(n_individuals=2000, n_snps=400, n_causal=20,
-                                          n_centers_list=[5, 10, 20], epsilons=[0.2, 0.5, 1.0, 1.5], n_reps=3)
+                                          n_centers_list=[5, 10, 20], epsilons=[0.2, 0.5, 1.0, 1.5], n_reps=3, output_dir=args.output_dir)
         r6b = experiment_gwas_metrics_vs_epsilon(
             n_individuals=2500, n_snps=600, n_causal=25, n_centers=5, n_reps=5,
+            output_dir=args.output_dir
         )
         r6c = experiment_gwas_metrics_vs_n_centers(
             n_individuals=2500, n_snps=600, n_causal=25, n_reps=5,
             epsilon=1.0,
+            output_dir=args.output_dir
         )
         r9 = experiment_posterior_gm_am(
             n_individuals=2500, n_snps=600, n_causal=25, n_centers=5, epsilon=1.0,
+            output_dir=args.output_dir
         )
-        r7 = run_experiment7(fast=False)
-
+        r7 = run_experiment7(size='medium', output_dir=args.output_dir)
+    elif size == 'large':
+        # do experiment with 10000 individuals and 100000 snps
+        r1 = experiment1_privacy_utility(n_individuals=10000, n_snps=100000, n_causal=1000, n_centers=5, n_reps=5, output_dir=args.output_dir)
+        r2 = experiment2_three_way(n_individuals_list=[1000, 2000, 4000, 8000], n_snps=100000, n_causal=1000, n_centers=5, n_reps=5, output_dir=args.output_dir)
+        r3 = experiment3_topology(n_individuals=10000, n_snps=100000, n_causal=1000, n_centers=5, n_reps=5, T=200, output_dir=args.output_dir)
+        r4 = experiment4_stratified(n_individuals=10000, n_snps=100000, n_causal=1000, n_reps=5, output_dir=args.output_dir)
+        r5 = experiment5_scaling(n_individuals_total=10000, n_snps=100000, n_causal=1000, n_reps=5, output_dir=args.output_dir)
+        r6 = experiment6_rizk_comparison(n_individuals=10000, n_snps=100000, n_causal=1000, n_centers_list=[5, 10, 20], epsilons=[0.2, 0.5, 1.0, 1.5], n_reps=5, output_dir=args.output_dir)
+        r6b = experiment_gwas_metrics_vs_epsilon(n_individuals=10000, n_snps=100000, n_causal=1000, n_centers=5, n_reps=5, epsilons=[0.1, 0.5, 1.0, 2.0], output_dir=args.output_dir)
+        r6c = experiment_gwas_metrics_vs_n_centers(
+            n_individuals=10000, n_snps=100000, n_causal=1000, n_reps=5,
+            epsilon=1.0,
+            output_dir=args.output_dir
+        )
+        r9 = experiment_posterior_gm_am(
+            n_individuals=10000, n_snps=100000, n_causal=1000, n_centers=5, epsilon=1.0,
+            output_dir=args.output_dir
+        )
+        r7 = run_experiment7(size='large', output_dir=args.output_dir)
+        
     # ---- Summary table ----
     print("\n" + "=" * 60)
     print("SUMMARY")
@@ -185,8 +212,14 @@ def main(fast: bool = False) -> None:
     for top_name, v in r7["r7a"].items():
         print(f"  Topology {top_name:15s}: power={np.mean(v['power']):.3f}  gap={v['sg']:.3f}")
 
-    print(f"\nAll figures saved to: {Path('../figures').resolve()}")
+    print(f"\nAll figures saved to: {args.output_dir}")
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--size', options=['small', 'medium', 'large'], default='small')
+    parser.add_argument('--output_dir', type=str, default='../figures')
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    main(fast="--fast" in sys.argv)
+    args = parse_args()
+    main(args)
