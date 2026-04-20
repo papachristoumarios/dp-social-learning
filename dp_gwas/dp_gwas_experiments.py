@@ -26,6 +26,8 @@ from pathlib import Path
 from scipy.special import expit
 import time
 import os
+import seaborn as sns
+import pandas as pd
 
 from dp_gwas_core import (
     simulate_gwas_data,
@@ -52,6 +54,15 @@ plt.rcParams.update({
 
 ALPHA_GWAS = 5e-8     # genome-wide significance
 
+
+NO_DP_DISTRIBUTED_LABEL = "No DP Distributed"
+DP_DISTRIBUTED_GM_LABEL = "DP Distributed (GM)"
+DP_DISTRIBUTED_AM_LABEL = "DP Distributed (AM)"
+
+SINGLE_CENTER_LABEL = "Single Center"
+ORACLE_LABEL = "Centralized"
+
+STATISTICAL_POWER_LABEL = "Statistical Power (Recall of causal SNPs)"
 
 # ---------------------------------------------------------------------------
 # Experiment 1 : Privacy-utility tradeoff
@@ -178,62 +189,48 @@ def experiment1_privacy_utility(
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     ax = axes[0]
-    ax.errorbar(eps_arr, power_gm, yerr=se_pgm, marker="o", label="DP-GWAS (GM)",
+    ax.errorbar(eps_arr, power_gm, yerr=se_pgm, marker="o", label=DP_DISTRIBUTED_GM_LABEL,
                 capsize=3, linewidth=1.5)
-    ax.errorbar(eps_arr, power_am, yerr=se_pam, marker="s", label="DP-GWAS (AM)",
+    ax.errorbar(eps_arr, power_am, yerr=se_pam, marker="s", label=DP_DISTRIBUTED_AM_LABEL,
                 capsize=3, linewidth=1.5, linestyle="--")
-    ax.axhline(oracle_p, color="gray", linestyle=":", linewidth=1.5, label="Centralized")
-    ax.axhline(single_p, color="gray", linestyle="-.", linewidth=1.2, label="Single center")
+    ax.axhline(oracle_p, color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
+    ax.axhline(single_p, color="gray", linestyle="-.", linewidth=1.2, label=SINGLE_CENTER_LABEL)
     ax.axhline(
         nodp_p_gm,
         color="#ba7517",
         linestyle=(0, (3, 1, 1, 1)),
         linewidth=1.4,
-        label="No DP (GM)",
+        label=NO_DP_DISTRIBUTED_LABEL,
     )
-    ax.axhline(
-        nodp_p_am,
-        color="#ba7517",
-        linestyle=(0, (1, 1)),
-        linewidth=1.2,
-        alpha=0.85,
-        label="No DP (AM)",
-    )
+    
     if eps_crit is not None:
         ax.axvline(eps_crit, color="red", linestyle="--", alpha=0.4, linewidth=1,
                    label=f"ε* ≈ {eps_crit}")
     ax.set_xlabel("Privacy budget ($\epsilon$)")
-    ax.set_ylabel("Statistical power")
+    ax.set_ylabel(STATISTICAL_POWER_LABEL)
     ax.set_xscale("log")
-    ax.set_ylim(0.4, 1.05)
+    ax.set_ylim(0.05, 1.05)
 
     ax = axes[1]
-    ax.plot(eps_arr, f1_gm, marker="o", label="DP-GWAS (GM)", linewidth=1.5)
-    ax.plot(eps_arr, f1_am, marker="s", label="DP-GWAS (AM)", linewidth=1.5, linestyle="--")
-    ax.axhline(oracle_f1_m, color="gray", linestyle=":", linewidth=1.5, label="Centralized")
-    ax.axhline(single_f1_m, color="gray", linestyle="-.", linewidth=1.2, label="Single center")
+    ax.plot(eps_arr, f1_gm, marker="o", label=DP_DISTRIBUTED_GM_LABEL, linewidth=1.5)
+    ax.plot(eps_arr, f1_am, marker="s", label=DP_DISTRIBUTED_AM_LABEL, linewidth=1.5, linestyle="--")
+    ax.axhline(oracle_f1_m, color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
+    ax.axhline(single_f1_m, color="gray", linestyle="-.", linewidth=1.2, label=SINGLE_CENTER_LABEL)
     ax.axhline(
         nodp_f1_gm_m,
         color="#ba7517",
         linestyle=(0, (3, 1, 1, 1)),
         linewidth=1.4,
-        label="No DP (GM)",
+        label=NO_DP_DISTRIBUTED_LABEL,
     )
-    ax.axhline(
-        nodp_f1_am_m,
-        color="#ba7517",
-        linestyle=(0, (1, 1)),
-        linewidth=1.2,
-        alpha=0.85,
-        label="No DP (AM)",
-    )
+    
     if eps_crit_f1 is not None:
         ax.axvline(eps_crit_f1, color="red", linestyle="--", alpha=0.4, linewidth=1,
                    label=f"ε* ≈ {eps_crit_f1}")
     ax.set_xlabel("Privacy budget ($\epsilon$)")
     ax.set_ylabel("F1 score")
     ax.set_xscale("log")
-    ax.set_ylim(0.4, 1.05)
+    ax.set_ylim(0.05, 1.05)
     ax.legend(fontsize=8, frameon=False)
 
     fig.suptitle(
@@ -270,6 +267,7 @@ def experiment2_three_way(
     epsilon: float = 1.0,
     n_reps: int = 4,
     seed: int = 2,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Compare oracle, single-site, DP-distributed, and no-DP distributed
@@ -327,26 +325,26 @@ def experiment2_three_way(
         "single_power",
         "nodp_power",
     )
-    ax.errorbar(N, agg[(col_o, "mean")], yerr=agg[(col_o, "sem")], marker="o", label="Centralized", linewidth=1.5)
-    ax.errorbar(N, agg[(col_d, "mean")], yerr=agg[(col_d, "sem")], marker="s", label=f"Distributed ($\epsilon={epsilon}$)", linewidth=1.5)
-    ax.errorbar(N, agg[(col_s, "mean")], yerr=agg[(col_s, "sem")], marker="^", label="Single-site", linewidth=1.5, linestyle="--")
+    ax.errorbar(N, agg[(col_o, "mean")], yerr=agg[(col_o, "sem")], marker="o", label=ORACLE_LABEL, linewidth=1.5)
+    ax.errorbar(N, agg[(col_d, "mean")], yerr=agg[(col_d, "sem")], marker="s", label=DP_DISTRIBUTED_GM_LABEL, linewidth=1.5)
+    ax.errorbar(N, agg[(col_s, "mean")], yerr=agg[(col_s, "sem")], marker="^", label=SINGLE_CENTER_LABEL, linewidth=1.5, linestyle="--")
     ax.errorbar(
         N,
         agg[(col_n, "mean")],
         yerr=agg[(col_n, "sem")],
         marker="D",
         color="#ba7517",
-        label="No DP",
+        label=NO_DP_DISTRIBUTED_LABEL,
         linewidth=1.5,
         linestyle=(0, (3, 1, 1, 1)),
     )
     ax.set_xlabel("Total cohort size ($N$)")
-    ax.set_ylabel("Statistical power")
+    ax.set_ylabel(STATISTICAL_POWER_LABEL)
     ax.set_ylim(0, 1.05)
     ax.legend(fontsize=8, frameon=False)
 
     fig.suptitle(
-        f"Statistical Power vs $N$ ($\epsilon={epsilon}$, $n={n_centers}$, $M_{{SNP}}={n_snps}$, $M_{{causal}}={n_causal}$)",
+        f"{STATISTICAL_POWER_LABEL} vs $N$ ($\epsilon={epsilon}$, $n={n_centers}$, $M_{{SNP}}={n_snps}$, $M_{{causal}}={n_causal}$)",
         fontsize=11,
     )
     fig.tight_layout()
@@ -409,48 +407,44 @@ def experiment3_topology(
         )
         traces[top] = dp_res.belief_trace
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-
-    # Convergence traces
-    ax = axes[0]
-    for top, tr in traces.items():
-        sg_val = spectral_gap(make_adjacency(n_centers, topology=top, seed=seed))
-        ax.plot(tr, label=f"{top} (spectral gap={sg_val:.2f})", linewidth=1.5)
-    ax.set_xlabel("Iteration ($t$)")
-    ax.set_ylabel("Belief std")
-    ax.set_yscale("log")
-    ax.legend(fontsize=8, frameon=False)
-    ax.set_title("Convergence speed by network topology")
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
 
     # Power bar chart
-    ax = axes[1]
+    ax = axes[0]
     x = np.arange(len(topologies))
     powers = [np.mean(results[t]["power"]) for t in topologies]
     sems   = [np.std(results[t]["power"]) / np.sqrt(n_reps) for t in topologies]
     slem_vals = [np.mean(results[t]["slem"]) for t in topologies]
     bars = ax.bar(x, powers, yerr=sems, capsize=4,
-                  color=["#1d9e75", "#534ab7", "#d85a30", "#888780", "#999999", "#534ab7"])
+                  color=["#1d9e75", "#534ab7", "#d85a30", "#888780", "#999999", "#ba7517"])
     ax.set_xticks(x)
-    ax.set_xticklabels(topologies)
-    ax.set_ylabel("Power (GM)")
+    ax.set_xticklabels(topologies, rotation=90, fontsize=8)
+    ax.set_ylabel(STATISTICAL_POWER_LABEL + " (GM)")
     ax.set_ylim(0, 1.1)
     ax.set_title("Power by topology")
-    for bar, sl in zip(bars, slem_vals):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                f"$1 - |\\lambda_2| = {sl:.2f}$", ha="center", fontsize=8, rotation=90)
 
     # Spectral gap vs convergence iteration
-    ax = axes[2]
-    sgs = [spectral_gap(make_adjacency(n_centers, t, seed=seed)) for t in topologies]
-    conv_iters = [np.mean(results[t]["converged_at"]) for t in topologies]
-    ax.scatter(sgs, conv_iters, s=80,
-               color=["#1d9e75", "#534ab7", "#d85a30", "#888780", "#999999", "#534ab7"], zorder=3)
-    for top, sg_v, ci in zip(topologies, sgs, conv_iters):
-        ax.annotate(top, (sg_v, ci), textcoords="offset points",
-                    xytext=(6, 3), fontsize=8)
+    ax = axes[1]
+    
+    records = []
+
+    for t in topologies:
+        A = make_adjacency(n_centers, topology=t, seed=seed)
+        sg = spectral_gap(A)
+        conv_iters = results[t]["converged_at"]
+
+        records.append({
+            'Spectral gap': sg,
+            'Convergence iterations': np.mean(conv_iters),
+            'Topology': t,
+        })
+    
+    df = pd.DataFrame(records)
+    sns.scatterplot(data=df, x='Spectral gap', y='Convergence iterations', style='Topology', ax=ax, s=80, palette=["#1d9e75", "#534ab7", "#d85a30", "#888780", "#999999", "#ba7517"])
     ax.set_xlabel("Spectral gap ($1 - |\\lambda_2|$)")
     ax.set_ylabel("Iterations to convergence")
     ax.set_title("Spectral gap vs convergence")
+
     ax.set_xscale("log")
 
     fig.suptitle(
@@ -547,27 +541,27 @@ def experiment4_stratified(
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     ax = axes[0]
-    ax.plot(h2_vals, h2_power_oracle, "o-", label="Centralized", linewidth=1.5)
-    ax.plot(h2_vals, h2_power_dp,     "s-", label=f"Distributed ($\epsilon={epsilon}$)", linewidth=1.5)
-    ax.plot(h2_vals, h2_power_single,  "^--", label="Single-site", linewidth=1.5)
+    ax.plot(h2_vals, h2_power_oracle, "o-", label=ORACLE_LABEL, linewidth=1.5)
+    ax.plot(h2_vals, h2_power_dp,     "s-", label=DP_DISTRIBUTED_GM_LABEL, linewidth=1.5)
+    ax.plot(h2_vals, h2_power_single,  "^--", label=SINGLE_CENTER_LABEL, linewidth=1.5)
     ax.set_xlabel("Heritability (h²)")
-    ax.set_ylabel("Statistical power")
+    ax.set_ylabel(STATISTICAL_POWER_LABEL)
     ax.set_ylim(0, 1.05)
     ax.legend(fontsize=8, frameon=False)
 
     ax = axes[1]
     x = np.arange(len(maf_labels))
     w = 0.35
-    ax.bar(x - w/2, power_by_maf_oracle, w, label="Centralized")
-    ax.bar(x + w/2, power_by_maf_dp,     w, label=f"Distributed ($\epsilon={epsilon}$)")
+    ax.bar(x - w/2, power_by_maf_oracle, w, label=ORACLE_LABEL)
+    ax.bar(x + w/2, power_by_maf_dp,     w, label=DP_DISTRIBUTED_GM_LABEL)
     ax.set_xticks(x)
     ax.set_xticklabels(maf_labels, rotation=15, fontsize=8)
-    ax.set_ylabel("Statistical power")
+    ax.set_ylabel(STATISTICAL_POWER_LABEL)
     ax.set_ylim(0, 1.1)
     ax.legend(fontsize=8, frameon=False)
 
     fig.suptitle(
-        f"Heritability & MAF strata  ($N={n_individuals}$, $n={n_centers}$)",
+        f"{STATISTICAL_POWER_LABEL} by heritability & MAF strata  ($N={n_individuals}$, $n={n_centers}$)",
         fontsize=11,
     )
     fig.tight_layout()
@@ -622,42 +616,23 @@ def experiment5_scaling(
             time_taken = time_end - time_start
 
             m = evaluate_gwas(dp_res.selected_gm, causal_idx, n_snps)
-            T_used = dp_res.converged_at if dp_res.converged_at < K * 500 else 200
+            
+            T_used = dp_res.converged_at
+            
             res[nc]["power"].append(m["power"])
             res[nc]["fdr"].append(m["fdr"])
             res[nc]["comm_complexity"].append(K * T_used * nc)
             res[nc]["time"].append(time_taken)
-    powers = [np.mean(res[nc]["power"]) for nc in n_centers_list]
     fdrs   = [np.mean(res[nc]["fdr"])   for nc in n_centers_list]
     comms  = [np.mean(res[nc]["comm_complexity"]) for nc in n_centers_list]
-    se_p   = [np.std(res[nc]["power"]) / np.sqrt(n_reps) for nc in n_centers_list]
     times  = [np.mean(res[nc]["time"]) for nc in n_centers_list]
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
 
     ax = axes[0]
-    ax.errorbar(n_centers_list, powers, yerr=se_p, marker="o", linewidth=1.5, capsize=3)
-    ax.set_xlabel("Number of centers ($n$)")
-    ax.set_ylabel("Statistical power (GM)")
-    ax.set_ylim(0, 1.05)
-    # Fit log curve to show polylog growth
-    log_n = np.log(n_centers_list)
-    try:
-        coeffs = np.polyfit(log_n, powers, 1)
-        ax.plot(n_centers_list,
-                np.polyval(coeffs, log_n),
-                "r--", alpha=0.5, linewidth=1, label=f"Log fit: $Power(n) = {coeffs[0]:.1g} \\log(n) + {coeffs[1]:.1g}$")
-        ax.legend(fontsize=8, frameon=False)
-    except Exception:
-        pass
-
-    ax.set_xticks(n_centers_list)
-    ax.set_xticklabels(n_centers_list)
-
-    ax = axes[1]
     ax.plot(n_centers_list, comms, marker="o", linewidth=1.5, color="#534ab7")
     ax.set_xlabel("Number of centers ($n$)")
-    ax.set_ylabel("Total communication cost ($K \cdot T \cdot n$)")
+    ax.set_ylabel("Total number of pairwise belief exchanges")
     # Overlay theoretical O(n log n) curve
     n_arr = np.array(n_centers_list, dtype=float)
     scale = comms[0] / (n_arr[0] * np.log(n_arr[0]))
@@ -668,7 +643,7 @@ def experiment5_scaling(
     ax.set_xticks(n_centers_list)
     ax.set_xticklabels(n_centers_list)
 
-    ax = axes[2]
+    ax = axes[1]
     ax.plot(n_centers_list, times, marker="o", linewidth=1.5, color="#534ab7")
     ax.set_xlabel("Number of centers ($n$)")
     ax.set_ylabel("Time taken (seconds)")
@@ -680,7 +655,7 @@ def experiment5_scaling(
     fig.tight_layout()
     fig.savefig(os.path.join(output_dir, "exp5_scaling.pdf"), bbox_inches="tight")
     print("  → saved exp5_scaling.pdf")
-    return dict(n_centers_list=n_centers_list, powers=powers, fdrs=fdrs, comms=comms)
+    return dict(n_centers_list=n_centers_list, fdrs=fdrs, comms=comms)
 
 # ---------------------------------------------------------------------------
 # Experiment 6 : Comparison with Rizk et al. 2023 (mirrors Fig 6)
@@ -863,7 +838,7 @@ def experiment_gwas_metrics_vs_epsilon(
 
     fig, axes = plt.subplots(1, 2, figsize=(8, 4), squeeze=False, sharey=True)
     panels = [
-        (axes[0, 0], "power", "Statistical power (Recall of causal SNPs)"),
+        (axes[0, 0], "power", STATISTICAL_POWER_LABEL),
         (axes[0, 1], "f1", "F1 score"),
     ]
 
@@ -877,7 +852,7 @@ def experiment_gwas_metrics_vs_epsilon(
             gm_m,
             yerr=gm_s,
             marker="o",
-            label="Distributed (GM)",
+            label=DP_DISTRIBUTED_GM_LABEL,
             capsize=3,
             linewidth=1.5,
         )
@@ -886,7 +861,7 @@ def experiment_gwas_metrics_vs_epsilon(
             am_m,
             yerr=am_s,
             marker="s",
-            label="Distributed (AM)",
+            label=DP_DISTRIBUTED_AM_LABEL,
             capsize=3,
             linewidth=1.5,
             linestyle="--",
@@ -896,30 +871,23 @@ def experiment_gwas_metrics_vs_epsilon(
             color="gray",
             linestyle=":",
             linewidth=1.5,
-            label="Centralized",
+            label=ORACLE_LABEL,
         )
         ax.axhline(
             single_mean[key],
             color="gray",
             linestyle="-.",
             linewidth=1.2,
-            label="Single center",
+            label=SINGLE_CENTER_LABEL,
         )
         ax.axhline(
             nodp_gm_mean[key],
             color="#ba7517",
             linestyle=(0, (3, 1, 1, 1)),
             linewidth=1.35,
-            label="No DP (GM)",
+            label=NO_DP_DISTRIBUTED_LABEL,
         )
-        ax.axhline(
-            nodp_am_mean[key],
-            color="#ba7517",
-            linestyle=(0, (1, 1)),
-            linewidth=1.15,
-            alpha=0.85,
-            label="No DP (AM)",
-        )
+        
         if key == "fdr":
             ax.axhline(
                 ALPHA_GWAS,
@@ -1073,7 +1041,7 @@ def experiment_gwas_metrics_vs_n_centers(
 
     fig, axes = plt.subplots(1, 2, figsize=(8, 4), squeeze=False, sharey=True)
     panels = [
-        (axes[0, 0], "power", "Statistical power (Recall of causal SNPs)"),
+        (axes[0, 0], "power", STATISTICAL_POWER_LABEL),
         (axes[0, 1], "f1", "F1 score"),
     ]
 
@@ -1087,7 +1055,7 @@ def experiment_gwas_metrics_vs_n_centers(
             gm_m,
             yerr=gm_s,
             marker="o",
-            label="DP-GWAS (GM)",
+            label=DP_DISTRIBUTED_GM_LABEL,
             capsize=3,
             linewidth=1.5,
         )
@@ -1096,7 +1064,7 @@ def experiment_gwas_metrics_vs_n_centers(
             am_m,
             yerr=am_s,
             marker="s",
-            label="DP-GWAS (AM)",
+            label=DP_DISTRIBUTED_AM_LABEL,
             capsize=3,
             linewidth=1.5,
             linestyle="--",
@@ -1107,29 +1075,17 @@ def experiment_gwas_metrics_vs_n_centers(
             yerr=agg[f"nodp_{key}_gm_se"],
             marker="D",
             color="#ba7517",
-            label="No DP (GM)",
+            label=NO_DP_DISTRIBUTED_LABEL,
             capsize=3,
             linewidth=1.35,
             linestyle=(0, (3, 1, 1, 1)),
-        )
-        ax.errorbar(
-            n_arr,
-            agg[f"nodp_{key}_am_mean"],
-            yerr=agg[f"nodp_{key}_am_se"],
-            marker="d",
-            color="#ba7517",
-            label="No DP (AM)",
-            capsize=3,
-            linewidth=1.2,
-            linestyle=(0, (1, 1)),
-            alpha=0.85,
         )
         ax.axhline(
             oracle_mean[key],
             color="gray",
             linestyle=":",
             linewidth=1.5,
-            label="Centralized",
+            label=ORACLE_LABEL,
         )
         ax.errorbar(
             n_arr,
@@ -1137,7 +1093,7 @@ def experiment_gwas_metrics_vs_n_centers(
             yerr=single_se_per_n[key],
             marker="^",
             color="#888780",
-            label="Single center",
+            label=SINGLE_CENTER_LABEL,
             capsize=3,
             linewidth=1.2,
             linestyle="-.",

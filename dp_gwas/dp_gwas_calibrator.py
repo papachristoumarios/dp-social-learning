@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Union
+import os
+import json
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -10,6 +12,8 @@ def parse_args():
     parser.add_argument('--output_directory', type=str, default='../datasets/IHAC_meta')
     parser.add_argument('--chr_min', type=int, default=1)
     parser.add_argument('--chr_max', type=int, default=22)
+    parser.add_argument('--only_params', action='store_true', default=False)
+    parser.add_argument('--load_params', type=str, default=None)
     return parser.parse_args()
 
 args = parse_args()
@@ -28,60 +32,6 @@ CHR_SNP_COUNTS = {
 GENOME_WIDE_SNPS = sum(CHR_SNP_COUNTS.values())   # ~2.9 M (HapMap3 scale)
 
 
-
-def or_to_liability_beta(
-    log_or: np.ndarray,
-    prevalence: float,
-    sample_prevalence: float = 0.5,
-) -> np.ndarray:
-    """
-    Convert observed log-OR from a case-control GWAS to liability-scale
-    effect sizes (betas) suitable for the simulator.
- 
-    Uses the Lee et al. (2011) liability-scale correction:
- 
-        beta_liab = beta_obs * [ K*(1-K) / z ] / [ K_s*(1-K_s) / z_s ]
- 
-    Where:
-        K    = population prevalence
-        K_s  = sample prevalence (0.5 for 1:1 design)
-        z    = N(0,1) PDF at liability threshold for K   → phi(Phi^-1(1-K))
-        z_s  = N(0,1) PDF at liability threshold for K_s → phi(Phi^-1(1-K_s))
- 
-    With 1:1 sampling (K_s = 0.5):
-        - threshold_s = 0  (by symmetry of the normal)
-        - z_s = phi(0) = 1/sqrt(2*pi) ~ 0.3989
-        - the correction factor simplifies considerably
- 
-    Parameters
-    ----------
-    log_or            : array of log-OR values (the OR column in your data)
-    prevalence        : population prevalence of the trait (K)
-    sample_prevalence : case fraction in the sample (default 0.5 for 1:1)
- 
-    Returns
-    -------
-    beta_liab : liability-scale effect sizes, ready for simulate_gwas_data()
-    """
-    from scipy.stats import norm
- 
-    K   = prevalence
-    K_s = sample_prevalence
- 
-    # Liability thresholds
-    t   = norm.ppf(1 - K)        # population threshold
-    t_s = norm.ppf(1 - K_s)      # sample threshold (= 0.0 for 1:1)
- 
-    # PDF heights at thresholds
-    z   = norm.pdf(t)             # phi(t)
-    z_s = norm.pdf(t_s)           # phi(0) = 0.3989 for 1:1
- 
-    # Lee et al. correction factor
-    correction = (K * (1 - K) / z) / (K_s * (1 - K_s) / z_s)
- 
-    return np.asarray(log_or, dtype=float) * correction
-
-
 # ---------------------------------------------------------------------------
 # Core simulator (unchanged from original)
 # ---------------------------------------------------------------------------
@@ -95,7 +45,8 @@ def simulate_gwas_data(
     binary_trait: bool = False,
     prevalence: float = 0.3,
     seed: int = 42,
-    odds_ratio: np.ndarray = None,
+    log_odds_ratio: np.ndarray = None,
+    output_directory: str = "../datasets",
 ) -> dict:
     """
     Simulate GWAS genotype + phenotype data under a polygenic model.
@@ -121,8 +72,8 @@ def simulate_gwas_data(
     causal_idx = rng.choice(n_snps, n_causal, replace=False)
     beta = np.zeros(n_snps)
     per_snp_var = h2 / n_causal
-    if odds_ratio is not None:
-        beta[causal_idx] = or_to_liability_beta(odds_ratio[causal_idx], prevalence)
+    if log_odds_ratio is not None:
+        beta[causal_idx] = log_odds_ratio[causal_idx]
     else:
         beta[causal_idx] = rng.normal(0, np.sqrt(per_snp_var), size=n_causal)
 
@@ -136,6 +87,26 @@ def simulate_gwas_data(
     else:
         env_noise = rng.normal(0, np.sqrt(max(1.0 - h2, 1e-6)), size=n_individuals)
         y = linear_pred + env_noise
+
+    # store y to a csv file
+    np.savetxt(os.path.join(output_directory, f"y_{n_individuals}_{n_snps}_{n_causal}.csv"), y, delimiter=",")
+    print(f"Saved y to {os.path.join(output_directory, f"y_{n_individuals}_{n_snps}_{n_causal}.csv")}")
+
+    # store beta to a csv file. beta is a numpy array
+    np.savetxt(os.path.join(output_directory, f"beta_{n_individuals}_{n_snps}_{n_causal}.csv"), beta, delimiter=",")
+    print(f"Saved beta to {os.path.join(output_directory, f"beta_{n_individuals}_{n_snps}_{n_causal}.csv")}")
+
+    # store causal_idx to a csv file. causal_idx is a numpy array
+    np.savetxt(os.path.join(output_directory, f"causal_idx_{n_individuals}_{n_snps}_{n_causal}.csv"), causal_idx, delimiter=",")
+    print(f"Saved causal_idx to {os.path.join(output_directory, f"causal_idx_{n_individuals}_{n_snps}_{n_causal}.csv")}")
+
+    # store mafs to a csv file. mafs is a numpy array
+    np.savetxt(os.path.join(output_directory, f"mafs_{n_individuals}_{n_snps}_{n_causal}.csv"), mafs, delimiter=",")
+    print(f"Saved mafs to {os.path.join(output_directory, f"mafs_{n_individuals}_{n_snps}_{n_causal}.csv")}")
+
+    # store G_std to a csv file. G_std is a numpy array
+    np.savetxt(os.path.join(output_directory, f"G_std_{n_individuals}_{n_snps}_{n_causal}.csv"), G_std, delimiter=",")
+    print(f"Saved G_std to {os.path.join(output_directory, f"G_std_{n_individuals}_{n_snps}_{n_causal}.csv")}")
 
     return dict(G_std=G_std, y=y, beta=beta, causal_idx=causal_idx, mafs=mafs)
 
@@ -370,9 +341,10 @@ if __name__ == "__main__":
     output_directory = args.output_directory
     chr_min = args.chr_min
     chr_max = min(args.chr_max, 22)
+    only_params = args.only_params
+    load_params = args.load_params
 
     os.makedirs(output_directory, exist_ok=True)
-
 
     chr_files = [
         os.path.join(input_directory, f"ihac2.chr{c}.eur.meta") for c in range(chr_min, chr_max + 1)
@@ -387,8 +359,25 @@ if __name__ == "__main__":
         verbose      = True,
     )
 
+    # store params to a json file
+    with open(os.path.join(output_directory, "params.json"), "w") as f:
+        json.dump(params, f)
+    print(f"Saved params to {os.path.join(output_directory, "params.json")}")
+
+    if only_params:
+        print("Only params were stored. Exiting...")
+        exit()
+
+    if load_params:
+        loaded_params = json.load(open(load_params))
+
+
     sim_params = params.copy()
-    sim_params["odds_ratio"] = causal_snps["OR"].values.astype(float)
+
+    if load_params:
+        sim_params['h2'] = loaded_params['h2']
+
+    sim_params["log_odds_ratio"] = causal_snps["OR"].values.astype(float)
 
     print(f"\nRunning demo simulation: {sim_params['n_snps']:,} SNPs, "
           f"{sim_params['n_individuals']:,} individuals, "
@@ -407,4 +396,3 @@ if __name__ == "__main__":
     print(f"\n--- Causal SNPs from real data ---")
     cols = ["CHR", "SNP", "A1", "A2", "N", "P", "OR", "I"]
     print(causal_snps[cols].sort_values(["CHR", "P"]).to_string(index=False))
-

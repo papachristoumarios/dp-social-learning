@@ -183,7 +183,6 @@ def sensitivity_score_stat(n_i: int, binary: bool = False) -> float:
     a single individual's contribution to (G_j^T y_c)^2 / (n * sigma2)
     is bounded.  We use the closed-form bound:
         Delta = 2 / n_i
-    which is conservative for the linear case (see Appendix F analog).
     """
     return 2.0 / n_i
 
@@ -451,8 +450,10 @@ def run_dp_gwas_mle(
         T = max(50, int(np.ceil(np.log(2.0 / max(float(alpha), 1e-15)) / np.log(1.0 / slem))))
         T = min(T, 500)
 
+    min_ni = min(c["G_std"].shape[0] for c in centers_data)
+    
     sensitivities = [
-        sensitivity_score_stat(c["G_std"].shape[0], binary=binary_trait)
+        sensitivity_score_stat(min_ni, binary=binary_trait)
         for c in centers_data
     ]
 
@@ -511,8 +512,8 @@ def run_dp_gwas_mle(
                     lbr = belief_tensor[:, :n_tv, 1] - belief_tensor[:, :n_tv, 0]
                     tv = float(np.std(lbr))
                     belief_trace.append(tv)
-                    if tv < convergence_tol and converged_at == T * K:
-                        converged_at = t
+                    if tv < convergence_tol:
+                        converged_at = min(converged_at, t)
 
             gm_accum[sl] += belief_tensor.mean(axis=0)
             ls_round = logsumexp(belief_tensor, axis=0)
@@ -553,8 +554,8 @@ def run_dp_gwas_mle(
     posterior_gm = np.exp(log_beliefs_gm[:, 1])
     posterior_am = np.exp(log_prob_am[:, 1])
 
-    selected_gm = (posterior_gm > 0.5) & (pvalues < alpha)
-    selected_am = (posterior_am > 0.2) & (pvalues < alpha)
+    selected_gm = pvalues < alpha
+    selected_am = pvalues < alpha
 
     return DPGWASResult(
         log_beliefs_gm=lbr_gm,

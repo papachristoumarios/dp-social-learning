@@ -37,6 +37,7 @@ from pathlib import Path
 from scipy.spatial.distance import cdist
 from scipy.special import logsumexp
 
+import os
 from dp_gwas_core import (
     simulate_gwas_data,
     run_dp_gwas_mle,
@@ -56,7 +57,6 @@ from dp_gwas_core import (
 )
 from scipy.stats import chi2
 import seaborn as sns
-        
 
 plt.rcParams.update({
     "font.size": 10,
@@ -66,6 +66,19 @@ plt.rcParams.update({
 })
 
 ALPHA_GWAS = 5e-8
+
+
+ALPHA_GWAS = 5e-8     # genome-wide significance
+
+# Label names
+NO_DP_DISTRIBUTED_LABEL = "No DP Distributed"
+DP_DISTRIBUTED_GM_LABEL = "DP Distributed (GM)"
+DP_DISTRIBUTED_AM_LABEL = "DP Distributed (AM)"
+
+SINGLE_CENTER_LABEL = "Single Center"
+ORACLE_LABEL = "Centralized"
+
+STATISTICAL_POWER_LABEL = "Statistical Power (Recall of causal SNPs)"
 
 # ---------------------------------------------------------------------------
 # County colour palette
@@ -236,8 +249,9 @@ def run_dp_gwas_custom_network(
     M = centers_data[0]["G_std"].shape[1]
     n_states = 2
 
+    min_ni = min(c["G_std"].shape[0] for c in centers_data)
     sensitivities = [
-        sensitivity_score_stat(c["G_std"].shape[0], binary=binary_trait)
+        sensitivity_score_stat(min_ni, binary=binary_trait)
         for c in centers_data
     ]
 
@@ -327,8 +341,8 @@ def run_dp_gwas_custom_network(
     # Selection: posterior ranking gated by calibrated p-value
     posterior_gm = np.exp(log_beliefs_gm[:, 1])
     posterior_am = np.exp(log_prob_am[:, 1])
-    selected_gm = (posterior_gm > 0.5) & (pvalues < alpha)
-    selected_am = (posterior_am > 0.5) & (pvalues < alpha)
+    selected_gm = pvalues < alpha
+    selected_am = pvalues < alpha
 
     return dict(
         lbr_gm=lbr_gm, lbr_am=lbr_am,
@@ -391,14 +405,10 @@ def _draw_hospital_map(
     ]
     ax.legend(handles=handles, fontsize=6, loc="lower left",
               frameon=True, framealpha=0.8, ncol=2)
-    ax.set_xlabel("Longitude", fontsize=8)
-    ax.set_ylabel("Latitude", fontsize=8)
     ax.set_title(title, fontsize=9)
-    ax.tick_params(labelsize=7)
     
     # despine
-    sns.despine(ax=ax)
-
+    ax.spines[["top", "right"]].set_visible(False)
 
 # ---------------------------------------------------------------------------
 # Experiment 7a: Geographic network topologies
@@ -414,6 +424,7 @@ def exp7a_network_topologies(
     K: int = 15,
     n_reps: int = 3,
     seed: int = 70,
+    output_dir: str = "../figures",
 ) -> dict:
     """
     Compare three network topologies using the real NYC hospital graph:
@@ -465,7 +476,7 @@ def exp7a_network_topologies(
             title=f"{top_name}\nspectral gap = {sg:.1g}, statistical power={pwr:.2f}",
             edge_alpha_scale=(3.0 if top_name != "Complete" else 0.3),
         )
-        sns.despine()
+        ax.spines[["top", "right"]].set_visible(False)
 
     fig.suptitle(
         f"NYC hospital network topologies  "
@@ -473,9 +484,9 @@ def exp7a_network_topologies(
         fontsize=11,
     )
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "exp7a_network_topologies.pdf"), bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7_nyc_network_topologies.pdf"), bbox_inches="tight")
     plt.close(fig)
-    print(f"    → saved exp7a_network_topologies.pdf")
+    print(f"    → saved exp7_nyc_network_topologies.pdf")
     return results
 
 
@@ -522,6 +533,11 @@ def exp7b_privacy_utility(
     nodp_fdrs_gm, nodp_fdrs_am = [], []
     oracle_fdrs: list[float] = []
 
+    # capture F1 scores
+    f1_gm, f1_am = [], []
+    f1_gm_nodp, f1_am_nodp = [], []
+    oracle_f1, single_f1 = [], []
+
     for rep in range(n_reps):
         data = simulate_gwas_data(total_individuals, n_snps, n_causal, seed=seed + rep * 7)
         centers_data = _split_by_sizes(data, cohort_sizes, seed=rep)
@@ -532,7 +548,8 @@ def exp7b_privacy_utility(
         oracle_powers.append(oracle["power"])
         single_powers.append(single["power"])
         oracle_fdrs.append(float(oracle["fdr"]))
-
+        oracle_f1.append(float(oracle["f1"]))
+        single_f1.append(float(single["f1"]))
         res_nd = run_dp_gwas_custom_network(
             centers_data,
             A_knn,
@@ -548,7 +565,10 @@ def exp7b_privacy_utility(
         nodp_powers_am.append(m_nd_am["power"])
         nodp_fdrs_gm.append(m_nd_gm["fdr"])
         nodp_fdrs_am.append(m_nd_am["fdr"])
-
+        f1_gm_nodp.append(m_nd_gm["f1"])
+        f1_am_nodp.append(m_nd_am["f1"])
+        f1_gm.append(m_gm["f1"])
+        f1_am.append(m_am["f1"])
     for eps in epsilons:
         p_gm_rep, p_am_rep, f_gm_rep, f_am_rep = [], [], [], []
         for rep in range(n_reps):
@@ -569,7 +589,8 @@ def exp7b_privacy_utility(
         power_am.append(np.mean(p_am_rep))
         fdr_gm.append(np.mean(f_gm_rep))
         fdr_am.append(np.mean(f_am_rep))
-
+        f1_gm.append(np.mean(f1_gm_rep))
+        f1_am.append(np.mean(f1_am_rep))
     oracle_p = np.mean(oracle_powers)
     single_p = np.mean(single_powers)
     nodp_p_gm = float(np.mean(nodp_powers_gm))
@@ -578,87 +599,70 @@ def exp7b_privacy_utility(
     nodp_fdr_gm = float(np.mean(nodp_fdrs_gm))
     nodp_fdr_am = float(np.mean(nodp_fdrs_am))
     eps_crit = next((e for e, p in zip(epsilons, power_gm) if p > single_p), None)
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    eps_crit_f1 = next((e for e, p in zip(epsilons, f1_gm) if p > single_p), None)
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
     ax = axes[0]
-    ax.plot(epsilons, power_gm, "o-", color="#534ab7", linewidth=1.8, label="DP-GWAS (GM)")
-    ax.plot(epsilons, power_am, "s--", color="#1d9e75", linewidth=1.8, label="DP-GWAS (AM)")
+    ax.plot(epsilons, power_gm, "o-", color="#534ab7", linewidth=1.8, label=DP_DISTRIBUTED_GM_LABEL)
+    ax.plot(epsilons, power_am, "s--", color="#1d9e75", linewidth=1.8, label=DP_DISTRIBUTED_AM_LABEL)
     ax.axhline(oracle_p, color="#888780", linestyle=":", linewidth=1.5,
-               label=f"Oracle ({n} hospitals pooled)")
+               label=f"{ORACLE_LABEL} ({n} hospitals pooled)")
     ax.axhline(single_p, color="#d85a30", linestyle="-.", linewidth=1.3,
-               label=f"Best single hospital\n({best_hosp_name})")
+               label=f"{SINGLE_CENTER_LABEL}\n({best_hosp_name})")
     ax.axhline(
         nodp_p_gm,
         color="#ba7517",
         linestyle=(0, (3, 1, 1, 1)),
         linewidth=1.35,
-        label="No DP (GM)",
-    )
-    ax.axhline(
-        nodp_p_am,
-        color="#ba7517",
-        linestyle=(0, (1, 1)),
-        linewidth=1.15,
-        alpha=0.85,
-        label="No DP (AM)",
+        label=NO_DP_DISTRIBUTED_LABEL,
     )
     if eps_crit:
         ax.axvline(eps_crit, color="red", linestyle="--", alpha=0.35, linewidth=1.2,
                    label=f"ε* ≈ {eps_crit}")
     ax.set_xlabel("Privacy budget (ε)")
-    ax.set_ylabel("Statistical power")
+    ax.set_ylabel(STATISTICAL_POWER_LABEL)
     ax.set_xscale("log")
     ax.set_ylim(-0.05, 1.10)
     ax.legend(fontsize=7.5, frameon=False)
-    ax.set_title(f"Power vs ε — {n} NYC hospitals")
 
     ax = axes[1]
-    ax.plot(epsilons, fdr_gm, "o-", color="#534ab7", linewidth=1.8, label="DP-GWAS (GM)")
-    ax.plot(epsilons, fdr_am, "s--", color="#1d9e75", linewidth=1.8, label="DP-GWAS (AM)")
-    ax.axhline(oracle_fdr_m, color="#888780", linestyle=":", linewidth=1.5, label="Oracle")
+    ax.plot(epsilons, fdr_f1_gm, "o-", color="#534ab7", linewidth=1.8, label=DP_DISTRIBUTED_GM_LABEL)
+    ax.plot(epsilons, fdr_f1_am, "s--", color="#1d9e75", linewidth=1.8, label=DP_DISTRIBUTED_AM_LABEL)
+    ax.axhline(oracle_f1, color="#888780", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
     ax.axhline(
-        nodp_fdr_gm,
+        nodp_f1_gm,
         color="#ba7517",
         linestyle=(0, (3, 1, 1, 1)),
         linewidth=1.35,
-        label="No DP (GM)",
+        label=NO_DP_DISTRIBUTED_LABEL,
     )
-    ax.axhline(
-        nodp_fdr_am,
-        color="#ba7517",
-        linestyle=(0, (1, 1)),
-        linewidth=1.15,
-        alpha=0.85,
-        label="No DP (AM)",
-    )
+    ax.set_ylabel('F1 Score')
     ax.set_xlabel("Privacy budget (ε)")
-    ax.set_ylabel("False discovery rate")
     ax.set_xscale("log")
     ax.legend(fontsize=8, frameon=False)
-    ax.set_title("FDR vs ε")
 
     # Annotate bed distribution as inset bar chart
     # move a bit lower
-    ax_inset = axes[1].inset_axes([0.55, 0.35, 0.42, 0.48])
+    ax = axes[2]
     county_beds = hospitals.groupby("COUNTY")["BEDS"].sum().reindex(list(COUNTY_COLORS.keys()), fill_value=0)
-    ax_inset.barh(range(len(county_beds)), county_beds.values,
+    ax.barh(range(len(county_beds)), county_beds.values,
                   color=[COUNTY_COLORS.get(c, "#888") for c in county_beds.index], height=0.7)
-    ax_inset.set_yticks(range(len(county_beds)))
-    ax_inset.set_yticklabels([c.title() for c in county_beds.index], fontsize=6)
-    ax_inset.set_xlabel("Total beds by county", fontsize=6)
-    ax_inset.tick_params(axis="x", labelsize=6)
-    ax_inset.spines[["top", "right"]].set_visible(False)
+    ax.set_yticks(range(len(county_beds)))
+    ax.set_yticklabels([c.title() for c in county_beds.index], fontsize=6)
+    ax.set_xlabel("Total beds by county", fontsize=6)
+    ax.tick_params(axis="x", labelsize=6)
+    ax.spines[["top", "right"]].set_visible(False)
 
     fig.suptitle(
         f"Privacy-utility on NYC hospital network\n"
         f"($n = {n}$, bed-proportional cohorts, k-NN topology, $\epsilon = {eps}$)",
         fontsize=10,
     )
+
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "exp7b_privacy_utility_nyc.pdf"), bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7_nyc_privacy_utility.pdf"), bbox_inches="tight")
     plt.close(fig)
-    print(f"    → saved exp7b_privacy_utility_nyc.pdf  (ε* ≈ {eps_crit})")
+    print(f"    → saved exp7_nyc_privacy_utility.pdf  (ε* ≈ {eps_crit})")
     return dict(
         epsilons=epsilons,
         power_gm=power_gm,
@@ -670,6 +674,13 @@ def exp7b_privacy_utility(
         nodp_power_am=nodp_p_am,
         eps_crit=eps_crit,
         best_hospital=best_hosp_name,
+        f1_gm=f1_gm,
+        f1_am=f1_am,
+        f1_gm_nodp=f1_gm_nodp,
+        f1_am_nodp=f1_am_nodp,
+        oracle_f1=oracle_f1,
+        single_f1=single_f1,
+        eps_crit_f1=eps_crit_f1,
     )
 
 
@@ -800,9 +811,9 @@ def exp7c_per_hospital_convergence(
         "Per-hospital belief convergence on NYC network",
         fontsize=11,
     )
-    fig.savefig(os.path.join(output_dir, "exp7c_per_hospital_convergence.pdf"), bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7_nyc_per_hospital_convergence.pdf"), bbox_inches="tight")
     plt.close(fig)
-    print("    → saved exp7c_per_hospital_convergence.pdf")
+    print("    → saved exp7_nyc_per_hospital_convergence.pdf")
     return dict(hub_idx=hub_idx.tolist(), periph_idx=periph_idx.tolist(),
                 tv_trace=res["tv_trace"])
 
@@ -933,12 +944,12 @@ def exp7d_county_federation(
 
     fig.suptitle(
         "County-level federation on NYC hospital network\n"
-        "($\Delta$ = counties that cannot detect signal independently)",
+        f"($n = {total_individuals}$, bed-proportional cohorts, k-NN topology, $\epsilon = {epsilon}$)",
         fontsize=10,
     )
-    fig.savefig(os.path.join(output_dir, "exp7d_county_federation.pdf"), bbox_inches="tight")
+    fig.savefig(os.path.join(output_dir, "exp7_nyc_county_federation.pdf"), bbox_inches="tight")
     plt.close(fig)
-    print("    → saved exp7d_county_federation.pdf")
+    print("    → saved exp7_nyc_county_federation.pdf")
     return dict(
         res_full=res_full, res_county=res_county,
         county_solo=county_solo, county_list=county_list,
@@ -990,8 +1001,8 @@ def _split_by_sizes(
 
 def run_experiment7(
     csv_path: str = "../datasets/us_hospital_locations.csv",
-    fast: bool = False,
     output_dir: str = "../figures", 
+    size: str = "medium",
 ) -> dict:
     """Run all four sub-experiments for Exp 7."""
     print("\nExperiment 7: Realistic NYC hospital network GWAS")
@@ -1002,12 +1013,17 @@ def run_experiment7(
     print(f"  Bed range: {hospitals['BEDS'].min()}–{hospitals['BEDS'].max()} "
           f"(median {hospitals['BEDS'].median():.0f})")
 
-    if fast:
-        cfg = dict(n_snps=200, n_causal=10, total_individuals=4000,
-                   T=80, K=8, n_reps=2)
-    else:
-        cfg = dict(n_snps=400, n_causal=20, total_individuals=8000,
+    if size == "medium":
+        cfg = dict(n_snps=600, n_causal=25, total_individuals=25000,
                    T=150, K=15, n_reps=3)
+    elif size == "large":
+        cfg = dict(n_snps=100000, n_causal=25, total_individuals=25000,
+                   T=200, K=20, n_reps=5)
+    elif size == 'real_world':
+        cfg = dict(n_snps=9205839, n_causal=4448, total_individuals=30000,
+                   T=200, K=20, n_reps=1)
+    else:
+        raise ValueError(f"Invalid size: {size}")
 
     r7a = exp7a_network_topologies(hospitals, **cfg)
     r7b = exp7b_privacy_utility(
@@ -1015,20 +1031,22 @@ def run_experiment7(
         n_snps=cfg["n_snps"], n_causal=cfg["n_causal"],
         total_individuals=cfg["total_individuals"],
         T=cfg["T"], K=cfg["K"], n_reps=cfg["n_reps"],
-        epsilons=[0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0] if not fast
-                  else [0.1, 0.5, 1.0, 2.0],
+        epsilons=[0.2, 0.5, 1.0, 1.5],
+        output_dir=output_dir,
     )
     r7c = exp7c_per_hospital_convergence(
         hospitals,
         n_snps=cfg["n_snps"], n_causal=cfg["n_causal"],
         total_individuals=cfg["total_individuals"],
         T=cfg["T"], K=min(cfg["K"], 5),
+        output_dir=output_dir,
     )
     r7d = exp7d_county_federation(
         hospitals,
         n_snps=cfg["n_snps"], n_causal=cfg["n_causal"],
         total_individuals=cfg["total_individuals"],
         T=cfg["T"], K=cfg["K"], n_reps=cfg["n_reps"],
+        output_dir=output_dir,
     )
 
     print(f"\n  Exp 7 summary:")
