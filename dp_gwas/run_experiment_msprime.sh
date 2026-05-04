@@ -9,15 +9,14 @@
 #SBATCH --output=../logs/%x-%j.out
 #SBATCH --error=../logs/%x-%j.err
 
-SIZE=$1
-
 module load mamba/latest
-
 
 source activate dp-social-learning
 
-OUTDIR="../figures/${SIZE}"
+OUTDIR="../figures"
 
-python -u run_experiments.py --size $SIZE --output_dir $OUTDIR
+mkdir -p $OUTDIR
+
+python -u run_experiment_msprime.py --output_dir $OUTDIR
 
 echo "Completed. Results are in: ${OUTDIR}"
