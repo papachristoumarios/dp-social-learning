@@ -1,0 +1,11 @@
+# clinical_trials.ipynb + dp_gwas/
+lifelines
+matplotlib
+msprime
+netgraph
+networkx
+numpy
+pandas
+scipy
+seaborn
+tqdm
