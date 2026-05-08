@@ -1,10 +1,5 @@
-"""
-experiment_msprime.py
-======================
-DP-GWAS experiments using the msprime coalescent DGP.
-"""
-
 import os, sys, argparse, warnings
+from itertools import product
 import time
 import numpy as np
 import matplotlib
@@ -14,9 +9,9 @@ from tqdm import tqdm
 import pandas as pd
 import seaborn as sns
 from scipy.special import expit
+from multiprocessing import Pool
 
 sys.path.insert(0, os.path.dirname(__file__))
-from dp_gwas_msprime import *
 from dp_gwas_core import *
 
 plt.rcParams.update({
@@ -29,18 +24,21 @@ plt.rcParams.update({
     ),
 })
 
-ALPHA_GWAS    = 1e-8
+ALPHA_LIST = [1e-7, 2e-7, 5e-7, 1e-6, 2e-6, 5e-6]
+ALPHA_GWAS = 2e-7
+
 MAF_RARE      = 0.01
 R2_THRESH     = 0.1    
 HERITABILITY  = 0.05   
 
-N_INDIVIDUALS = 10_000
-N_SNPS        = 1_000
+N_SNPS        = 600
 N_COMMON      = 300       
 N_RARE        = 700      
-N_CAUSAL      = 20
+N_CAUSAL      = 25
 N_CENTERS     = 5
-K_ROUNDS      = 15
+N_INDIVIDUALS = 25_000
+
+K_ROUNDS      = 30
 
 FIGSIZE       = 3
 
@@ -90,6 +88,7 @@ def _simulate_rep(
     n_rare: int = N_RARE,
     h2: float = HERITABILITY,
     base_seed: int = 100,
+    weights: np.ndarray = None,
 ):
     seed = base_seed + rep
     with warnings.catch_warnings():
@@ -103,7 +102,7 @@ def _simulate_rep(
             n_common_target=n_common,
             n_rare_target=n_rare,
         )
-    centers = split_data_across_centers(data, n_centers, seed=seed)
+    centers = split_data_across_centers(data, n_centers, seed=seed, weights=weights)
     return data, centers
 
 def exp10_power_fdr_vs_epsilon(n_reps: int = 5, output_dir: str = "figures"):
@@ -131,6 +130,7 @@ def exp10_power_fdr_vs_epsilon(n_reps: int = 5, output_dir: str = "figures"):
         common_mask = data["common_mask"]
         G_std       = data["G_std"]
         n_snps      = G_std.shape[1]
+
 
         # Baselines
         oracle = centralized_gwas(centers, alpha=ALPHA_GWAS)
@@ -199,19 +199,14 @@ def exp10_power_fdr_vs_epsilon(n_reps: int = 5, output_dir: str = "figures"):
 
             ax.errorbar(eps_arr, gm_m, yerr=gm_se, marker="o",
                         color=c_gm, capsize=3, linewidth=1.6, label=DP_DISTRIBUTED_GM_LABEL)
-            ax.errorbar(eps_arr, am_m, yerr=am_se, marker="s",
-                        color=c_am, capsize=3, linewidth=1.6, linestyle="--", label=DP_DISTRIBUTED_AM_LABEL)
+            # ax.errorbar(eps_arr, am_m, yerr=am_se, marker="s",
+            #             color=c_am, capsize=3, linewidth=1.6, linestyle="--", label=DP_DISTRIBUTED_AM_LABEL)
             ax.plot(eps_arr, nd_m, marker="D", color="#ba7517",
                     linewidth=1.4, linestyle=(0, (3, 1, 1, 1)), label=NO_DP_DISTRIBUTED_LABEL)
             ax.axhline(ora_m, color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
             ax.axhline(sng_m, color="gray", linestyle="-.", linewidth=1.2, label=SINGLE_CENTER_LABEL)
 
-            if metric == "fdr":
-                ax.axhline(ALPHA_GWAS, color="red", linestyle="--",
-                           linewidth=1, alpha=0.6, label="α threshold")
-                ax.set_ylim(-0.02, 0.6)
-            elif metric == "power":
-                ax.set_ylim(-0.02, 1.05)
+            ax.set_ylim(-0.02, 1.05)
 
             ax.set_xscale("log")
             ax.set_xlabel("Privacy budget (ε)")
@@ -221,12 +216,12 @@ def exp10_power_fdr_vs_epsilon(n_reps: int = 5, output_dir: str = "figures"):
             if r == 0 and c == len(metrics) - 1:
                 ax.legend(fontsize=7, frameon=False, loc="best")
 
-    fig.suptitle(
-        f"DP-GWAS (COSI, FDR, r²>{R2_THRESH}) — metrics vs ε\n"
-        f"$N={N_INDIVIDUALS}$, {N_COMMON} common + {N_RARE} rare SNPs, "
-        f"{N_CAUSAL} causal SNPs, {N_CENTERS} centers",
-        fontsize=11, y=1.01,
-    )
+    # fig.suptitle(
+    #     f"DP-GWAS (COSI, FDR, r²>{R2_THRESH}) — metrics vs ε\n"
+    #     f"$N={N_INDIVIDUALS}$, {N_COMMON} common + {N_RARE} rare SNPs, "
+    #     f"{N_CAUSAL} causal SNPs, {N_CENTERS} centers",
+    #     fontsize=11, y=1.01,
+    # )
     fig.tight_layout()
     out = os.path.join(output_dir, "exp10_power_fdr_vs_epsilon.pdf")
     fig.savefig(out, bbox_inches="tight")
@@ -244,7 +239,7 @@ def exp11_power_fdr_vs_n_centers(
 ):
     print("\n=== Experiment 11: Metrics vs n_centers ===")
 
-    n_centers_list = [2, 5, 10, 20]
+    n_centers_list = [4, 6, 8, 10]
     strata  = ["all", "rare", "common"]
     metrics = ["power", "fdr", "f1"]
 
@@ -266,6 +261,7 @@ def exp11_power_fdr_vs_n_centers(
         G_std       = data["G_std"]
         n_snps      = G_std.shape[1]
 
+
         centers_max = split_data_across_centers(data, max(n_centers_list), seed=rep)
         oracle = centralized_gwas(centers_max, alpha=ALPHA_GWAS)
         m_ora_all, m_ora_rare, m_ora_common = _eval_stratum(
@@ -277,11 +273,9 @@ def exp11_power_fdr_vs_n_centers(
         for nc in n_centers_list:
             centers = split_data_across_centers(data, nc, seed=rep)
 
-            nodp = run_dp_gwas_mle(centers, epsilon=np.inf, alpha=ALPHA_GWAS,
-                                   K=1, topology="complete", seed=rep * 1000)
+            nodp = run_dp_gwas_mle(centers, epsilon=np.inf, alpha=ALPHA_GWAS, K=1, topology="complete", seed=rep * 1000)
             single = single_center_gwas(centers, alpha=ALPHA_GWAS)
-            dp = run_dp_gwas_mle(centers, epsilon=epsilon, alpha=ALPHA_GWAS,
-                                 K=K_ROUNDS, topology="complete", seed=rep * 1000)
+            dp = run_dp_gwas_mle(centers, epsilon=epsilon, alpha=ALPHA_GWAS, K=K_ROUNDS, topology="complete", seed=rep * 1000)
 
             m_nd_all, m_nd_rare, m_nd_common = _eval_stratum(
                 nodp.selected_gm, causal_idx, G_std, n_snps, rare_mask, common_mask)
@@ -336,20 +330,15 @@ def exp11_power_fdr_vs_n_centers(
 
             ax.errorbar(nc_arr, gm_m, yerr=gm_se, marker="o",
                         color=c_gm, capsize=3, linewidth=1.6, label=DP_DISTRIBUTED_GM_LABEL)
-            ax.errorbar(nc_arr, am_m, yerr=am_se, marker="s",
-                        color=c_am, capsize=3, linewidth=1.6, linestyle="--", label=DP_DISTRIBUTED_AM_LABEL)
+            # ax.errorbar(nc_arr, am_m, yerr=am_se, marker="s",
+                        # color=c_am, capsize=3, linewidth=1.6, linestyle="--", label=DP_DISTRIBUTED_AM_LABEL)
             ax.plot(nc_arr, nd_m, marker="D", color="#ba7517",
                     linewidth=1.4, linestyle=(0, (3, 1, 1, 1)), label=NO_DP_DISTRIBUTED_LABEL)
             ax.plot(nc_arr, sc_m, marker="^", color="#888780",
                     linewidth=1.2, linestyle="-.", label=SINGLE_CENTER_LABEL)
             ax.axhline(ora_m, color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
 
-            if metric == "fdr":
-                ax.axhline(ALPHA_GWAS, color="red", linestyle="--",
-                           linewidth=1, alpha=0.6, label="α threshold")
-                ax.set_ylim(-0.02, 0.6)
-            elif metric == "power":
-                ax.set_ylim(-0.02, 1.05)
+            ax.set_ylim(-0.02, 1.05)
 
             ax.set_xticks(nc_arr)
             ax.set_xticklabels(nc_arr)
@@ -360,11 +349,11 @@ def exp11_power_fdr_vs_n_centers(
             if r == 0 and c == len(metrics) - 1:
                 ax.legend(fontsize=7, frameon=False, loc="best")
 
-    fig.suptitle(
-        f"DP-GWAS (COSI, FDR, r²>{R2_THRESH}) — metrics vs n_centers (ε={epsilon})\n"
-        f"$N={N_INDIVIDUALS}$, {N_COMMON} common + {N_RARE} rare SNPs, {N_CAUSAL} causal SNPs",
-        fontsize=11, y=1.01,
-    )
+    # fig.suptitle(
+    #     f"DP-GWAS (COSI, FDR, r²>{R2_THRESH}) — metrics vs n_centers (ε={epsilon})\n"
+    #     f"$N={N_INDIVIDUALS}$, {N_COMMON} common + {N_RARE} rare SNPs, {N_CAUSAL} causal SNPs",
+    #     fontsize=11, y=1.01,
+    # )
     fig.tight_layout()
     out = os.path.join(output_dir, "exp11_power_fdr_vs_n_centers.pdf")
     fig.savefig(out, bbox_inches="tight")
@@ -421,155 +410,16 @@ def exp12_manhattan_plot(output_dir: str = "figures"):
         ax.legend(fontsize=8, frameon=False, ncol=3, loc="upper right")
 
     axes[-1].set_xlabel(f"SNP index (200 kb region, {N_COMMON} common + {N_RARE} rare variants)")
-    fig.suptitle(
-        f"Manhattan plot\n"
-        f"{N_INDIVIDUALS} individuals, {N_COMMON} common + {N_RARE} rare SNPs, {N_CAUSAL} causal SNPs, {N_CENTERS} centers",
-        fontsize=12,
-    )
+    # fig.suptitle(
+    #     f"Manhattan plot\n"
+    #     f"{N_INDIVIDUALS} individuals, {N_COMMON} common + {N_RARE} rare SNPs, {N_CAUSAL} causal SNPs, {N_CENTERS} centers",
+    #     fontsize=12,
+    # )
     fig.tight_layout()
     out = os.path.join(output_dir, "exp12_manhattan.pdf")
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"  → saved {out}")
-
-
-def exp1_privacy_utility(
-    n_reps: int = 3,
-    epsilons: list[float] | None = None,
-    base_seed: int = 1,
-    output_dir: str = "figures",
-    snp_chunk_size: int = 100,
-):
-    if epsilons is None:
-        epsilons = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
-
-    print("\n=== Experiment 1: Privacy-utility ===")
-    results = {eps: {"power_gm": [], "fdr_gm": [], "f1_gm": [],
-                     "power_am": [], "fdr_am": [], "f1_am": []}
-               for eps in epsilons}
-    oracle_power, oracle_fdr, oracle_f1 = [], [], []
-    single_power, single_fdr, single_f1 = [], [], []
-    nodp_power_gm, nodp_fdr_gm, nodp_f1_gm = [], [], []
-    nodp_power_am, nodp_fdr_am, nodp_f1_am = [], [], []
-
-    for rep in tqdm(range(n_reps), desc="exp1"):
-        data, centers = _simulate_rep(rep, base_seed=base_seed + 1000)
-        causal_idx, G_std = data["causal_idx"], data["G_std"]
-        n_snps = G_std.shape[1]
-
-        oracle = centralized_gwas(centers, alpha=ALPHA_GWAS)
-        single = single_center_gwas(centers, alpha=ALPHA_GWAS)
-        mo = _locus_metrics(oracle["selected"], causal_idx, G_std, n_snps)
-        ms = _locus_metrics(single["selected"], causal_idx, G_std, n_snps)
-        oracle_power.append(mo["power"])
-        oracle_fdr.append(mo["fdr"])
-        oracle_f1.append(mo["f1"])
-        single_power.append(ms["power"])
-        single_fdr.append(ms["fdr"])
-        single_f1.append(ms["f1"])
-
-        nodp = run_dp_gwas_mle(
-            centers, epsilon=np.inf, alpha=ALPHA_GWAS, K=1,
-            topology="complete", seed=base_seed + rep * 100,
-            snp_chunk_size=snp_chunk_size,
-        )
-        for sel, p_l, f_l, f1_l in [
-            (nodp.selected_gm, nodp_power_gm, nodp_fdr_gm, nodp_f1_gm),
-            (nodp.selected_am, nodp_power_am, nodp_fdr_am, nodp_f1_am),
-        ]:
-            m = _locus_metrics(sel, causal_idx, G_std, n_snps)
-            p_l.append(m["power"])
-            f_l.append(m["fdr"])
-            f1_l.append(m["f1"])
-
-        for eps in epsilons:
-            res = run_dp_gwas_mle(
-                centers, epsilon=eps, alpha=ALPHA_GWAS, K=K_ROUNDS,
-                topology="complete", seed=base_seed + rep * 100,
-                snp_chunk_size=snp_chunk_size,
-            )
-            m_gm = _locus_metrics(res.selected_gm, causal_idx, G_std, n_snps)
-            m_am = _locus_metrics(res.selected_am, causal_idx, G_std, n_snps)
-            results[eps]["power_gm"].append(m_gm["power"])
-            results[eps]["fdr_gm"].append(m_gm["fdr"])
-            results[eps]["f1_gm"].append(m_gm["f1"])
-            results[eps]["power_am"].append(m_am["power"])
-            results[eps]["fdr_am"].append(m_am["fdr"])
-            results[eps]["f1_am"].append(m_am["f1"])
-
-    mean = lambda lst: float(np.mean(lst))
-    se = lambda lst: float(np.std(lst) / np.sqrt(max(len(lst), 1)))
-    eps_arr = np.array(epsilons)
-    power_gm = [mean(results[e]["power_gm"]) for e in epsilons]
-    power_am = [mean(results[e]["power_am"]) for e in epsilons]
-    fdr_gm = [mean(results[e]["fdr_gm"]) for e in epsilons]
-    fdr_am = [mean(results[e]["fdr_am"]) for e in epsilons]
-    f1_gm = [mean(results[e]["f1_gm"]) for e in epsilons]
-    f1_am = [mean(results[e]["f1_am"]) for e in epsilons]
-    se_pgm = [se(results[e]["power_gm"]) for e in epsilons]
-    se_pam = [se(results[e]["power_am"]) for e in epsilons]
-    se_fgm = [se(results[e]["fdr_gm"]) for e in epsilons]
-    se_fam = [se(results[e]["fdr_am"]) for e in epsilons]
-
-    oracle_p, oracle_f_m, oracle_f1_m = mean(oracle_power), mean(oracle_fdr), mean(oracle_f1)
-    single_p, single_f_m, single_f1_m = mean(single_power), mean(single_fdr), mean(single_f1)
-    nodp_p_gm = mean(nodp_power_gm)
-    nodp_fdr_gm_m = mean(nodp_fdr_gm)
-    nodp_f1_gm_m = mean(nodp_f1_gm)
-
-    eps_crit = next((epsilons[i] for i in range(len(epsilons)) if power_gm[i] > single_p), None)
-    eps_crit_f1 = next((epsilons[i] for i in range(len(epsilons)) if f1_gm[i] > single_f1_m), None)
-
-    nrows, ncols = 1, 3
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * FIGSIZE, nrows * FIGSIZE))
-    axes[0].errorbar(eps_arr, power_gm, yerr=se_pgm, marker="o", label=DP_DISTRIBUTED_GM_LABEL, capsize=3, linewidth=1.5)
-    axes[0].errorbar(eps_arr, power_am, yerr=se_pam, marker="s", label=DP_DISTRIBUTED_AM_LABEL, capsize=3, linewidth=1.5, linestyle="--")
-    axes[0].axhline(oracle_p, color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
-    axes[0].axhline(single_p, color="gray", linestyle="-.", linewidth=1.2, label=SINGLE_CENTER_LABEL)
-    axes[0].axhline(nodp_p_gm, color="#ba7517", linestyle=(0, (3, 1, 1, 1)), linewidth=1.4, label=NO_DP_DISTRIBUTED_LABEL)
-    if eps_crit is not None:
-        axes[0].axvline(eps_crit, color="red", linestyle="--", alpha=0.4, linewidth=1, label=f"ε* ≈ {eps_crit}")
-    axes[0].set_xlabel("Privacy budget ($\\epsilon$)")
-    axes[0].set_ylabel(STATISTICAL_POWER_LABEL)
-    axes[0].set_xscale("log")
-    axes[0].set_ylim(0.05, 1.05)
-
-    axes[1].errorbar(eps_arr, fdr_gm, yerr=se_fgm, marker="o", label=DP_DISTRIBUTED_GM_LABEL, capsize=3, linewidth=1.5)
-    axes[1].errorbar(eps_arr, fdr_am, yerr=se_fam, marker="s", label=DP_DISTRIBUTED_AM_LABEL, capsize=3, linewidth=1.5, linestyle="--")
-    axes[1].axhline(oracle_f_m, color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
-    axes[1].axhline(single_f_m, color="gray", linestyle="-.", linewidth=1.2, label=SINGLE_CENTER_LABEL)
-    axes[1].axhline(nodp_fdr_gm_m, color="#ba7517", linestyle=(0, (3, 1, 1, 1)), linewidth=1.4, label=NO_DP_DISTRIBUTED_LABEL)
-    axes[1].set_xlabel("Privacy budget ($\\epsilon$)")
-    axes[1].set_ylabel(FDR_LABEL)
-    axes[1].set_xscale("log")
-    axes[1].set_ylim(-0.02, 0.65)
-    axes[1].legend(fontsize=8, frameon=False)
-
-    axes[2].plot(eps_arr, f1_gm, marker="o", label=DP_DISTRIBUTED_GM_LABEL, linewidth=1.5)
-    axes[2].plot(eps_arr, f1_am, marker="s", label=DP_DISTRIBUTED_AM_LABEL, linewidth=1.5, linestyle="--")
-    axes[2].axhline(oracle_f1_m, color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
-    axes[2].axhline(single_f1_m, color="gray", linestyle="-.", linewidth=1.2, label=SINGLE_CENTER_LABEL)
-    axes[2].axhline(nodp_f1_gm_m, color="#ba7517", linestyle=(0, (3, 1, 1, 1)), linewidth=1.4, label=NO_DP_DISTRIBUTED_LABEL)
-    if eps_crit_f1 is not None:
-        axes[2].axvline(eps_crit_f1, color="red", linestyle="--", alpha=0.4, linewidth=1, label=f"ε* (F1) ≈ {eps_crit_f1}")
-    axes[2].set_xlabel("Privacy budget ($\\epsilon$)")
-    axes[2].set_ylabel("F1 score")
-    axes[2].set_xscale("log")
-    axes[2].set_ylim(0.05, 1.05)
-    axes[2].legend(fontsize=8, frameon=False, loc="best")
-
-    fig.suptitle(
-        f"Privacy-utility tradeoff\n"
-        f"(${N_INDIVIDUALS}$ individuals, ${N_SNPS}$ SNPs, ${N_CAUSAL}$ causal SNPs, ${N_CENTERS}$ centers)",
-        fontsize=11,
-    )
-    fig.tight_layout()
-    out = os.path.join(output_dir, "exp1_privacy_utility.pdf")
-    fig.savefig(out, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  → saved {out}")
-    return dict(results=results, eps_crit=eps_crit, eps_crit_f1=eps_crit_f1, oracle_power=oracle_p, oracle_fdr=oracle_f_m, oracle_f1=oracle_f1_m, single_power=single_p, single_fdr=single_f_m, single_f1=single_f1_m, nodp_power=nodp_p_gm, nodp_fdr=nodp_fdr_gm_m, nodp_f1=nodp_f1_gm_m)
-
 
 def exp2_three_way(
     n_individuals_list: list[int] | None = None,
@@ -577,10 +427,10 @@ def exp2_three_way(
     n_reps: int = 3,
     base_seed: int = 2,
     output_dir: str = "figures",
-    snp_chunk_size: int = 100,
+    snp_chunk_size: int = N_SNPS,
 ):
     if n_individuals_list is None:
-        n_individuals_list = [2000, 4000, 8000, 16_000]
+        n_individuals_list = [15000, 20000, 25000]
 
     print("\n=== Experiment 2: Metrics vs cohort size ===")
     rows = []
@@ -640,10 +490,10 @@ def exp2_three_way(
     axes[1].set_ylim(-0.02, 0.65)
     axes[1].legend(fontsize=8, frameon=False)
 
-    fig.suptitle(
-        f"Power and FDR vs cohort size ($\\epsilon={epsilon}$, $n={N_CENTERS}$ centers, ${N_SNPS}$ SNPs)",
-        fontsize=11,
-    )
+    # fig.suptitle(
+    #     f"Power and FDR vs cohort size ($\\epsilon={epsilon}$, $n={N_CENTERS}$ centers, ${N_SNPS}$ SNPs)",
+    #     fontsize=11,
+    # )
     fig.tight_layout()
     out = os.path.join(output_dir, "exp2_three_way.pdf")
     fig.savefig(out, bbox_inches="tight")
@@ -659,7 +509,7 @@ def exp3_topology(
     n_reps: int = 3,
     base_seed: int = 3,
     output_dir: str = "figures",
-    snp_chunk_size: int = 100,
+    snp_chunk_size: int = N_SNPS,
 ):
     topologies = ["complete", "ring", "random", "star", "scale-free", "small-world"]
     print("\n=== Experiment 3: Metrics vs topology ===")
@@ -730,7 +580,7 @@ def exp3_topology(
     axes[2].set_title("Spectral gap vs convergence")
     axes[2].set_xscale("log")
 
-    fig.suptitle(f"Topology (${N_INDIVIDUALS}$ individuals, $\\epsilon={epsilon}$, $n={n_centers}$ centers)", fontsize=11)
+    # fig.suptitle(f"Topology (${N_INDIVIDUALS}$ individuals, $\\epsilon={epsilon}$, $n={n_centers}$ centers)", fontsize=11)
     fig.tight_layout()
     out = os.path.join(output_dir, "exp3_topology.pdf")
     fig.savefig(out, bbox_inches="tight")
@@ -747,7 +597,7 @@ def exp4_stratified(
     snp_chunk_size: int = 100,
 ):
     print("\n=== Experiment 4: Metrics vs heritability and MAF strata ===")
-    h2_vals = [0.01, 0.02, 0.03, 0.04, 0.05]
+    h2_vals = [0.01, 0.05, 0.1]
     h2_power_oracle, h2_power_dp, h2_power_single = [], [], []
     h2_fdr_oracle, h2_fdr_dp, h2_fdr_single = [], [], []
 
@@ -847,7 +697,7 @@ def exp4_stratified(
     axes[1, 1].set_ylim(0, 0.65)
     axes[1, 1].legend(fontsize=8, frameon=False)
 
-    fig.suptitle(f"Heritability and MAF strata ($n={N_CENTERS}$)", fontsize=11)
+    # fig.suptitle(f"Heritability and MAF strata ($n={N_CENTERS}$)", fontsize=11)
     fig.tight_layout()
     out = os.path.join(output_dir, "exp4_stratified.pdf")
     fig.savefig(out, bbox_inches="tight")
@@ -863,7 +713,7 @@ def exp5_scaling(
     output_dir: str = "figures",
     snp_chunk_size: int = 100,
 ):
-    n_centers_list = [2, 3, 5, 8, 10, 15, 20]
+    n_centers_list = [4, 6, 8, 10]
     topologies = ["complete", "ring", "star", "random", "small-world", "scale-free"]
     palette = ["#1d9e75", "#534ab7", "#d85a30", "#888780", "#999999", "#ba7517"]
     print("\n=== Exp5: Scaling n_centers × topology ===")
@@ -939,7 +789,7 @@ def exp5_scaling(
     axes[1, 1].set_ylabel(FDR_LABEL + " (GM)")
     axes[1, 1].set_ylim(-0.02, 0.65)
 
-    fig.suptitle(f"Scaling (${N_INDIVIDUALS}$ individuals, $\\epsilon={epsilon}$)", fontsize=11)
+    # fig.suptitle(f"Scaling (${N_INDIVIDUALS}$ individuals, $\\epsilon={epsilon}$)", fontsize=11)
     fig.tight_layout()
     out = os.path.join(output_dir, "exp5_scaling.pdf")
     fig.savefig(out, bbox_inches="tight")
@@ -955,6 +805,7 @@ def exp6_rizk_comparison(
     base_seed: int = 6,
     output_dir: str = "figures",
     snp_chunk_size: int = 100,
+    tune: bool = False,
 ):
     if n_centers_list is None:
         n_centers_list = [5, 10, 20]
@@ -1009,7 +860,7 @@ def exp6_rizk_comparison(
         ax.legend(fontsize=7, frameon=False)
         all_results[nc] = dict(epsilons=epsilons, tvd_gm=tvd_gm, tvd_am=tvd_am, tvd_rizk=tvd_rizk)
 
-    fig.suptitle("Comparison with Rizk et al. 2023", fontsize=11)
+    # fig.suptitle("Comparison with Rizk et al. 2023", fontsize=11)
     fig.tight_layout()
     out = os.path.join(output_dir, "exp6_rizk_comparison.pdf")
     fig.savefig(out, bbox_inches="tight")
@@ -1018,17 +869,22 @@ def exp6_rizk_comparison(
     return all_results
 
 
-def exp7_gwas_metrics_vs_epsilon(
+def exp1_privacy_utility(
     n_reps: int = 3,
     epsilons: list[float] | None = None,
     base_seed: int = 7,
     output_dir: str = "figures",
-    snp_chunk_size: int = 100,
+    snp_chunk_size: int = N_SNPS,
+    weights: np.ndarray = None,
+    topology: str = "complete",
+    filename: str = 'exp1_gwas_metrics_vs_epsilon.pdf',
+    title: str = None,
+    **kwargs
 ):
     if epsilons is None:
-        epsilons = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
+        epsilons = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 100.0]
 
-    print("\n=== Exp7: Metrics vs $\\epsilon$ ===")
+    print("\n=== Exp1: Metrics vs $\\epsilon$ ===")
     metric_keys = ("power", "fdr", "f1", "fpr")
     results = {eps: {f"{m}_gm": [] for m in metric_keys} for eps in epsilons}
     for eps in epsilons:
@@ -1037,8 +893,13 @@ def exp7_gwas_metrics_vs_epsilon(
 
     oracle_rows, single_rows, nodp_gm_rows, nodp_am_rows = [], [], [], []
 
-    for rep in tqdm(range(n_reps), desc="exp7"):
-        data, centers = _simulate_rep(rep, base_seed=base_seed + 2000)
+    if weights is not None:
+        n_centers = weights.shape[0]
+    else:
+        n_centers = N_CENTERS
+
+    for rep in tqdm(range(n_reps), desc="exp1"):
+        data, centers = _simulate_rep(rep, base_seed=base_seed + 2000, weights=weights, n_centers=n_centers)
         causal_idx, G_std = data["causal_idx"], data["G_std"]
         n_snps = G_std.shape[1]
 
@@ -1049,7 +910,8 @@ def exp7_gwas_metrics_vs_epsilon(
 
         nodp = run_dp_gwas_mle(
             centers, epsilon=np.inf, alpha=ALPHA_GWAS, K=1,
-            topology="complete", seed=base_seed + rep * 100, snp_chunk_size=snp_chunk_size,
+            topology=topology, seed=base_seed + rep * 100, snp_chunk_size=snp_chunk_size,
+            **kwargs
         )
         nodp_gm_rows.append({k: _locus_metrics(nodp.selected_gm, causal_idx, G_std, n_snps)[k] for k in metric_keys})
         nodp_am_rows.append({k: _locus_metrics(nodp.selected_am, causal_idx, G_std, n_snps)[k] for k in metric_keys})
@@ -1057,7 +919,8 @@ def exp7_gwas_metrics_vs_epsilon(
         for eps in epsilons:
             res = run_dp_gwas_mle(
                 centers, epsilon=eps, alpha=ALPHA_GWAS, K=K_ROUNDS,
-                topology="complete", seed=base_seed + rep * 100, snp_chunk_size=snp_chunk_size,
+                topology=topology, seed=base_seed + rep * 100, snp_chunk_size=snp_chunk_size,
+                **kwargs
             )
             m_gm = _locus_metrics(res.selected_gm, causal_idx, G_std, n_snps)
             m_am = _locus_metrics(res.selected_am, causal_idx, G_std, n_snps)
@@ -1091,24 +954,26 @@ def exp7_gwas_metrics_vs_epsilon(
     ]
     for ax, key, ylabel in panels:
         ax.errorbar(eps_arr, agg[f"{key}_gm_mean"], yerr=agg[f"{key}_gm_se"], marker="o", label=DP_DISTRIBUTED_GM_LABEL, capsize=3, linewidth=1.5)
-        ax.errorbar(eps_arr, agg[f"{key}_am_mean"], yerr=agg[f"{key}_am_se"], marker="s", label=DP_DISTRIBUTED_AM_LABEL, capsize=3, linewidth=1.5, linestyle="--")
+        # ax.errorbar(eps_arr, agg[f"{key}_am_mean"], yerr=agg[f"{key}_am_se"], marker="s", label=DP_DISTRIBUTED_AM_LABEL, capsize=3, linewidth=1.5, linestyle="--")
         ax.axhline(oracle_mean[key], color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
         ax.axhline(single_mean[key], color="gray", linestyle="-.", linewidth=1.2, label=SINGLE_CENTER_LABEL)
         ax.axhline(nodp_gm_mean[key], color="#ba7517", linestyle=(0, (3, 1, 1, 1)), linewidth=1.35, label=NO_DP_DISTRIBUTED_LABEL)
-        if key == "fdr":
-            ax.axhline(ALPHA_GWAS, color="red", linestyle="--", linewidth=1, alpha=0.6, label="$\\alpha$ threshold")
-            ax.set_ylim(-0.02, 0.65)
+        ax.set_ylim(-0.02, 1.05)
         ax.set_xlabel("Privacy budget ($\\epsilon$)")
         ax.set_ylabel(ylabel)
         ax.set_xscale("log")
         ax.legend(fontsize=7, frameon=False, loc="best")
 
-    fig.suptitle(
-        f"Power and FDR vs $\\epsilon$ (${N_INDIVIDUALS}$ individuals, ${N_SNPS}$ SNPs, ${N_CENTERS}$ centers)",
-        fontsize=11,
-    )
+    if title is None:
+        fig.suptitle(
+            f"${N_INDIVIDUALS}$ individuals, ${N_SNPS}$ SNPs, ${n_centers}$ centers, {topology.capitalize()} network topology",
+            fontsize=11,
+        )
+    else:
+        fig.suptitle(title, fontsize=11)
+    
     fig.tight_layout()
-    out = os.path.join(output_dir, "exp7_gwas_metrics_vs_epsilon.pdf")
+    out = os.path.join(output_dir, filename)
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"  → saved {out}")
@@ -1197,7 +1062,7 @@ def exp8_gwas_metrics_vs_n_centers(
     ]
     for ax, key, ylabel in panels:
         ax.errorbar(n_arr, agg[f"{key}_gm_mean"], yerr=agg[f"{key}_gm_se"], marker="o", label=DP_DISTRIBUTED_GM_LABEL, capsize=3, linewidth=1.5)
-        ax.errorbar(n_arr, agg[f"{key}_am_mean"], yerr=agg[f"{key}_am_se"], marker="s", label=DP_DISTRIBUTED_AM_LABEL, capsize=3, linewidth=1.5, linestyle="--")
+        # ax.errorbar(n_arr, agg[f"{key}_am_mean"], yerr=agg[f"{key}_am_se"], marker="s", label=DP_DISTRIBUTED_AM_LABEL, capsize=3, linewidth=1.5, linestyle="--")
         ax.errorbar(n_arr, agg[f"nodp_{key}_gm_mean"], yerr=agg[f"nodp_{key}_gm_se"], marker="D", color="#ba7517", label=NO_DP_DISTRIBUTED_LABEL, capsize=3, linewidth=1.35, linestyle=(0, (3, 1, 1, 1)))
         ax.axhline(oracle_mean[key], color="gray", linestyle=":", linewidth=1.5, label=ORACLE_LABEL)
         ax.errorbar(n_arr, single_mean_per_n[key], yerr=single_se_per_n[key], marker="^", color="#888780", label=SINGLE_CENTER_LABEL, capsize=3, linewidth=1.2, linestyle="-.")
@@ -1227,6 +1092,7 @@ def exp9_posterior_gm_am(
     base_seed: int = 9,
     output_dir: str = "figures",
     snp_chunk_size: int = 100,
+    n_reps: int = 3,
 ):
     print("\n=== Posterior GM vs AM ===")
     data, centers = _simulate_rep(0, base_seed=base_seed + 4000)
@@ -1278,86 +1144,468 @@ def exp9_posterior_gm_am(
     print(f"  → saved {out}")
     return dict(posterior_gm=posterior_gm, posterior_am=posterior_am, causal_idx=causal_idx)
 
-def tune_experiments(output_dir: str, n_reps: int, epsilon: float):
+
+def _split_by_sizes(
+    data: dict,
+    sizes: np.ndarray,
+    seed: int = 0,
+) -> list[dict]:
+    """
+    Split data['G_std'] and data['y'] into len(sizes) centers,
+    with center i receiving exactly sizes[i] individuals (sampled w/o replacement).
+    """
+    rng = np.random.default_rng(seed)
+    n_total = data["G_std"].shape[0]
+    sizes = np.array(sizes)
+    total_needed = int(sizes.sum())
+
+    # If more individuals requested than available, sample with replacement
+    if total_needed > n_total:
+        perm = rng.choice(n_total, size=total_needed, replace=True)
+    else:
+        perm = rng.choice(n_total, size=total_needed, replace=False)
+
+    centers = []
+    start = 0
+    for sz in sizes:
+        idx = perm[start : start + sz]
+        centers.append({
+            "G_std":      data["G_std"][idx],
+            "y":          data["y"][idx],
+            "beta":       data["beta"],
+            "causal_idx": data["causal_idx"],
+            "mafs":       data["mafs"],
+        })
+        start += sz
+    return centers
+
+
+def exp13_nyc_federation(
+    n_snps: int = N_SNPS,
+    total_individuals: int = N_INDIVIDUALS,
+    epsilon: float = 1.0,
+    n_reps: int = 3,
+    base_seed: int = 1300,
+    output_dir: str = "../figures",
+) -> dict:
+    
+    dataset_csv = "../datasets/nyc_hospitals_w_organizations.csv"
+
+    hospitals_df = pd.read_csv(dataset_csv)
+    # sort by BEDS
+    hospitals_df = hospitals_df.sort_values(by='BEDS', ascending=False)
+
+    hospitals_df['weights'] = hospitals_df['BEDS'] / hospitals_df['BEDS'].sum()
+
+    organizations_df = hospitals_df.groupby("ORGANIZATION")["BEDS"].sum().reset_index()
+    organizations_df.columns = ["ORGANIZATION", "BEDS"]
+    organizations_df = organizations_df.sort_values(by='BEDS', ascending=False)
+    organizations_df['weights'] = organizations_df['BEDS'] / organizations_df['BEDS'].sum()
+
+    organizations = organizations_df["ORGANIZATION"].unique()
+
+    hospital_beds = organizations_df["BEDS"].values
+    organization_beds = organizations_df["BEDS"].values
+
+    delta = 0.95 - 1 / N_INDIVIDUALS
+
+
+    print(f"Privacy Delta = {delta}")
+
+    # plot bed distributions
+    
+    fig, ax = plt.subplots(2, 1, figsize=(FIGSIZE, 2 * FIGSIZE), squeeze=False)
+    org_range = np.arange(0, len(organizations_df))
+    hosp_range = np.arange(0, len(hospitals_df))
+
+    # subdivide ax[0, 3] into 2 subplots (top and bottom)
+    ax[0, 0].barh(org_range, organizations_df['BEDS'].values, color='gray')
+    # remove yticks 
+    ax[0, 0].set_yticks([])
+    ax[0, 0].set_ylabel('Organization')
+    ax[0, 0].set_xlabel('# Beds')
+    ax[0, 0].set_title('Organization-level\nBed Distribution')
+
+    ax[1, 0].barh(hosp_range, hospitals_df['BEDS'].values, color='gray')
+    # remove yticks 
+    ax[1, 0].set_yticks([])
+    ax[1, 0].set_ylabel('Hospital')
+    ax[1, 0].set_xlabel('# Beds')
+    ax[1, 0].set_title('Hospital-level\nBed Distribution')
+    
+    fig.tight_layout()
+    out = os.path.join(output_dir, "exp13_nyc_bed_distributions.pdf")
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  → saved {out}")
+
+    print('Privacy-utity tradeoff')
+
+    # print('Hospital-level (knn, complete)')
+    exp1_privacy_utility(n_reps=n_reps, weights=hospitals_df['weights'].values, filename='exp13_nyc_privacy_utility_hosp_knn.pdf', topology='knn', hospitals=hospitals_df, T=10, output_dir=output_dir, title='Hospital-level Geographical Network')
+    exp1_privacy_utility(n_reps=n_reps, weights=hospitals_df['weights'].values, filename='exp13_nyc_privacy_utility_hosp_complete.pdf', topology='complete', hospitals=hospitals_df, T=10, output_dir=output_dir, title='Hospital-level Complete Network')
+
+    print('Organization-level (complete, star)')
+    exp1_privacy_utility(n_reps=n_reps, weights=organizations_df['weights'].values, filename='exp13_nyc_privacy_utility_org_complete.pdf', topology='complete', T=10, output_dir=output_dir, title='Organization-level Complete Network')
+    exp1_privacy_utility(n_reps=n_reps, weights=organizations_df['weights'].values, filename='exp13_nyc_privacy_utility_org_star.pdf', topology='star', T=10, output_dir=output_dir, title='Organization-level Star Network')
+
+    records = []
+
+    for rep in range(n_reps):
+        for network_type, weights in [('Org-level', organizations_df['weights'].values), ('Hosp-level', hospitals_df['weights'].values)]:
+            data, centers = _simulate_rep(rep, base_seed=base_seed + rep * 11, weights=weights)
+            causal_idx, G_std = data["causal_idx"], data["G_std"]
+            n_snps = G_std.shape[1]
+            res = run_dp_gwas_mle(
+                centers,
+                epsilon=epsilon,
+                alpha=ALPHA_GWAS,
+                K=K_ROUNDS,
+                topology="complete",
+                seed=rep * 1000 + 17,
+                snp_chunk_size=N_SNPS,
+            )
+            m_all, m_rare, m_common = _eval_stratum(
+                res.selected_gm,
+                causal_idx,
+                G_std,
+                n_snps,
+                data["rare_mask"],
+                data["common_mask"],
+            )
+
+            records.append({
+                'Power': m_all['power'],
+                'FDR': m_all['fdr'],
+                'F1': m_all['f1'],
+                'Type': DP_DISTRIBUTED_GM_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'All',
+                'Network Type' : network_type
+            })
+
+            records.append({
+                'Power': m_rare['power'],
+                'FDR': m_rare['fdr'],
+                'F1': m_rare['f1'],
+                'Type': DP_DISTRIBUTED_GM_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'Rare',
+                'Network Type' : network_type
+            })
+
+            records.append({
+                'Power': m_common['power'],
+                'FDR': m_common['fdr'],
+                'F1': m_common['f1'],
+                'Type': DP_DISTRIBUTED_GM_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'Common',
+                'Network Type' : network_type
+            })
+
+            # run centralized gwas
+            oracle = centralized_gwas(centers, alpha=ALPHA_GWAS)
+            m_oracle_all, m_oracle_rare, m_oracle_common = _eval_stratum(
+                oracle['selected'],
+                causal_idx,
+                G_std,
+                n_snps,
+                data['rare_mask'],
+                data['common_mask'],
+            )
+
+            records.append({
+                'Power': m_oracle_all['power'],
+                'FDR': m_oracle_all['fdr'],
+                'F1': m_oracle_all['f1'],
+                'Type': ORACLE_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'All',
+                'Network Type' : network_type
+            })
+
+            records.append({
+                'Power': m_oracle_rare['power'],
+                'FDR': m_oracle_rare['fdr'],
+                'F1': m_oracle_rare['f1'],
+                'Type': ORACLE_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'Rare',
+                'Network Type' : network_type
+            })
+            
+            records.append({
+                'Power': m_oracle_common['power'],
+                'FDR': m_oracle_common['fdr'],
+                'F1': m_oracle_common['f1'],
+                'Type': ORACLE_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'Common',
+                'Network Type' : network_type,
+            })
+
+            # run single center gwas
+            single = single_center_gwas(centers, alpha=ALPHA_GWAS)
+            m_single_all, m_single_rare, m_single_common = _eval_stratum(
+                single['selected'],
+                causal_idx,
+                G_std,
+                n_snps,
+                data['rare_mask'],
+                data['common_mask'],
+            )
+
+            records.append({
+                'Power': m_single_all['power'],
+                'FDR': m_single_all['fdr'],
+                'F1': m_single_all['f1'],
+                'Type': SINGLE_CENTER_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'All',
+                'Network Type' : network_type
+            })
+
+            records.append({
+                'Power': m_single_rare['power'],
+                'FDR': m_single_rare['fdr'],
+                'F1': m_single_rare['f1'],
+                'Type': SINGLE_CENTER_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'Rare',
+                'Network Type' : network_type
+            })
+
+            records.append({
+                'Power': m_single_common['power'],
+                'FDR': m_single_common['fdr'],
+                'F1': m_single_common['f1'],
+                'Type': SINGLE_CENTER_LABEL,    
+                'rep' : rep,
+                'Variant Type' : 'Common',
+                'Network Type' : network_type
+            })
+
+            # run no dp gwas
+            nodp = run_dp_gwas_mle(centers, 
+                epsilon=np.inf, 
+                alpha=ALPHA_GWAS, 
+                K=1, 
+                topology="complete", 
+                seed=rep * 1000 + 17, 
+                snp_chunk_size=N_SNPS
+            )
+            m_nodp_all, m_nodp_rare, m_nodp_common = _eval_stratum(
+                nodp.selected_gm,
+                causal_idx,
+                G_std,
+                n_snps,
+                data['rare_mask'],
+                data['common_mask'],
+            )
+
+            records.append({
+                'Power': m_nodp_all['power'],
+                'FDR': m_nodp_all['fdr'],
+                'F1': m_nodp_all['f1'],
+                'Type': NO_DP_DISTRIBUTED_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'All',
+                'Network Type' : network_type
+            })
+
+            records.append({
+                'Power': m_nodp_rare['power'],
+                'FDR': m_nodp_rare['fdr'],
+                'F1': m_nodp_rare['f1'],
+                'Type': NO_DP_DISTRIBUTED_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'Rare',
+                'Network Type' : network_type
+            })
+
+            records.append({
+                'Power': m_nodp_common['power'],
+                'FDR': m_nodp_common['fdr'],
+                'F1': m_nodp_common['f1'],
+                'Type': NO_DP_DISTRIBUTED_LABEL,
+                'rep' : rep,
+                'Variant Type' : 'Common',
+                'Network Type' : network_type
+            })
+
+    df = pd.DataFrame(records)
+
+    df_common = df[df['Variant Type'] == 'Common']
+    df_rare = df[df['Variant Type'] == 'Rare']
+    df_all = df[df['Variant Type'] == 'All']
+
+    variant_list = [
+        ('Common', df_common),
+        ('Rare', df_rare),
+        ('All', df_all),
+    ]
+
+
+    for variant_type, df_variant in variant_list:
+        fig, ax = plt.subplots(1, 5, figsize=(4*FIGSIZE, FIGSIZE), squeeze=False, gridspec_kw={'width_ratios': [1, 1, 1, 0.5, 0.5]})
+        sns.barplot(x='Network Type', y='Power', hue='Type', data=df_variant, ax=ax[0, 0], legend=False)
+        ax[0, 0].set_xlabel('')
+        ax[0, 0].set_ylabel('Power')
+        ax[0, 0].set_ylim(0, 1)
+        sns.barplot(x='Network Type', y='FDR', hue='Type', data=df_variant, ax=ax[0, 1], legend=True)
+        ax[0, 1].set_xlabel('')
+        ax[0, 1].set_ylabel('FDR')
+        ax[0, 1].set_ylim(0, 1)
+        sns.barplot(x='Network Type', y='F1', hue='Type', data=df_variant, ax=ax[0, 2], legend=False)
+        ax[0, 2].set_xlabel('')
+        ax[0, 2].set_ylabel('F1 Score')
+        ax[0, 2].set_ylim(0, 1)
+        
+        # move legend outside of the axes so that it doesn't overlap with the bars
+        ax[0, 1].legend(loc='upper right')
+        
+        # plot the number of beds in descending order for the hospitals and organizations
+        hospitals_df = hospitals_df.sort_values(by='BEDS', ascending=False)
+        organizations_df = organizations_df.sort_values(by='BEDS', ascending=False)
+
+        org_range = np.arange(0, len(organizations_df))
+        hosp_range = np.arange(0, len(hospitals_df))
+
+        # subdivide ax[0, 3] into 2 subplots (top and bottom)
+        ax[0, 3].barh(org_range, organizations_df['BEDS'].values, color='gray')
+        # remove yticks 
+        ax[0, 3].set_yticks([])
+        ax[0, 3].set_xlabel('# Beds')
+        ax[0, 3].set_title('Org-level\nDistribution')
+
+        ax[0, 4].barh(hosp_range, hospitals_df['BEDS'].values, color='gray')
+        # remove yticks 
+        ax[0, 4].set_yticks([])
+        ax[0, 4].set_xlabel('# Beds')
+        ax[0, 4].set_title('Hosp-level\nDistribution')
+        
+        fig.tight_layout()
+        fig.savefig(os.path.join(output_dir, f'exp13_{variant_type}.pdf'), bbox_inches='tight')
+
+    return df
+
+
+def tune_experiment(
+    n_reps: int,
+    epsilon: float,
+    base_seed: int = 100,
+    K: int = K_ROUNDS,
+    T: int = None,
+    h2: float = HERITABILITY,
+    n_centers: int = N_CENTERS,
+    topology: str = "complete",
+    convergence_tol: float = 1e-4,
+    fdr_cap: float = 0.,
+    fdr_penalty: float = 3.0,
+):
+
+    print(f"Tuning for epsilon={epsilon}, h2={h2}, n_centers={n_centers}, topology={topology}, convergence_tol={convergence_tol}, fdr_cap={fdr_cap}, fdr_penalty={fdr_penalty}")
+
+    rows: list[dict] = []
+    for alpha in ALPHA_LIST:
+        powers, fdrs, f1s = [], [], []
+        for rep in tqdm(range(n_reps), desc=f"Tune {alpha}"):
+            data, centers = _simulate_rep(rep, base_seed=base_seed, h2=h2, n_centers=n_centers  )
+            causal_idx, G_std = data["causal_idx"], data["G_std"]
+            n_snps = G_std.shape[1]
+            res = run_dp_gwas_mle(
+                centers,
+                epsilon=epsilon,
+                alpha=alpha,
+                K=K,
+                T=T,
+                topology=topology,
+                convergence_tol=convergence_tol,
+                track_convergence=False,
+                seed=rep * 1000 + 17,
+            )
+            m_all, _, _ = _eval_stratum(
+                res.selected_gm,
+                causal_idx,
+                G_std,
+                n_snps,
+                data["rare_mask"],
+                data["common_mask"],
+            )
+
+            powers.append(m_all['power'])
+            fdrs.append(m_all['fdr'])
+            f1s.append(m_all['f1'])
+
+        p_mean, p_se = float(np.mean(powers)), float(np.std(powers) / np.sqrt(max(len(powers), 1)))
+        f_mean, f_se = float(np.mean(fdrs)), float(np.std(fdrs) / np.sqrt(max(len(fdrs), 1)))
+        z_mean, z_se = float(np.mean(f1s)), float(np.std(f1s) / np.sqrt(max(len(f1s), 1)))
+        score = z_mean - fdr_penalty * max(0.0, f_mean - fdr_cap)
+
+        rows.append(
+            dict(
+                K=K,
+                T=("auto" if T is None else int(T)),
+                alpha=alpha,
+                topology=topology,
+                convergence_tol=convergence_tol,
+                power_mean=p_mean,
+                power_se=p_se,
+                fdr_mean=f_mean,
+                fdr_se=f_se,
+                f1_mean=z_mean,
+                f1_se=z_se,
+                score=score,
+                n_reps=n_reps,
+                epsilon=epsilon,
+            )
+        )
+
+    df = pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
+
+    best = df.iloc[0]
+    
+    return best["alpha"]
+
+def run_experiments(args: argparse.Namespace):
+    output_dir = args.output_dir
+    n_reps = args.n_reps
+    epsilon = args.epsilon
+    
+    experiments = args.experiments
+
     os.makedirs(output_dir, exist_ok=True)
+    
+    if experiments == 'all' or experiments == 'regular':
+        exp1_privacy_utility(n_reps=n_reps, output_dir=output_dir)
+        exp2_three_way(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
+        exp3_topology(n_reps=max(2, min(n_reps, 3)), output_dir=output_dir)
+        exp4_stratified(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
+        exp5_scaling(n_reps=max(2, min(n_reps, 2)), epsilon=epsilon, output_dir=output_dir)
+        exp6_rizk_comparison(n_reps=n_reps, output_dir=output_dir)
+        exp8_gwas_metrics_vs_n_centers(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
+        exp9_posterior_gm_am(epsilon=epsilon, output_dir=output_dir, n_reps=n_reps)
+        exp10_power_fdr_vs_epsilon(n_reps=n_reps, output_dir=output_dir)
+        exp11_power_fdr_vs_n_centers(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
+        exp12_manhattan_plot(output_dir=output_dir)
 
-
-    ALPHA_THRESHOLD_RANGE = [1e-5, 1e-6, 1e-7, 1e-8]
-    N_CAUSAL_RANGE = [5, 10, 20, 50, 100]
-    HERITABILITY_RANGE = [0.05]
-    N_INDIVIDUALS_RANGE = [10000, 12500, 15000, 17500, 20000]
-
-    BEST_ALPHA = None
-    BEST_N_CAUSAL = None
-    BEST_HERITABILITY = None
-    BEST_N_INDIVIDUALS = None
-    BEST_F1 = 0
-    BEST_FDR = 0
-    BEST_POWER = 0
-
-    for alpha in ALPHA_THRESHOLD_RANGE:
-        for n_causal in N_CAUSAL_RANGE:
-            for h2 in HERITABILITY_RANGE:
-                for n_individuals in N_INDIVIDUALS_RANGE:
-                    # run centralized gwas to get oracle power and fdr
-                    data, centers = _simulate_rep(0, base_seed=4000, n_causal=n_causal, h2=h2, n_individuals=n_individuals, n_snps=N_SNPS, n_centers=1)
-                    causal_idx, G_std = data["causal_idx"], data["G_std"]
-                    n_snps = G_std.shape[1]
-                    oracle = centralized_gwas(centers, alpha=alpha)
-                    oracle_power = oracle["power"]
-                    oracle_fdr = oracle["fdr"]
-                    oracle_f1 = oracle["f1"]
-
-                    
-                    print(f"Alpha: {alpha}, N_causal: {n_causal}, Heritability: {h2}, N_individuals: {n_individuals}, F1: {oracle_f1}, Power: {oracle_power}, FDR: {oracle_fdr} (valid: {oracle_fdr <= 0.05}, Power >= BEST_POWER)")
-
-                    if oracle_fdr <= 0.05 and oracle_power >= BEST_POWER:
-                        BEST_ALPHA = alpha
-                        BEST_N_CAUSAL = n_causal
-                        BEST_HERITABILITY = h2
-                        BEST_N_INDIVIDUALS = n_individuals
-                        BEST_F1 = oracle_f1
-                        BEST_FDR = oracle_fdr
-                        BEST_POWER = oracle_power
-
-    print(f"Best alpha: {BEST_ALPHA}")
-    print(f"Best n_causal: {BEST_N_CAUSAL}")
-    print(f"Best heritability: {BEST_HERITABILITY}")
-    print(f"Best f1: {BEST_F1}")
-    print(f"Best fdr: {BEST_FDR}")
-    print(f"Best power: {BEST_POWER}")
-    print(f"Best n_individuals: {BEST_N_INDIVIDUALS}")
-
-def run_experiments(output_dir: str, n_reps: int, epsilon: float):
-    os.makedirs(output_dir, exist_ok=True)
-   
-    exp1_privacy_utility(n_reps=n_reps, output_dir=output_dir)
-    exp2_three_way(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
-    exp3_topology(n_reps=max(2, min(n_reps, 3)), output_dir=output_dir)
-    exp4_stratified(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
-    exp5_scaling(n_reps=max(2, min(n_reps, 2)), epsilon=epsilon, output_dir=output_dir)
-    exp6_rizk_comparison(n_reps=n_reps, output_dir=output_dir)
-    exp7_gwas_metrics_vs_epsilon(n_reps=n_reps, output_dir=output_dir)
-    exp8_gwas_metrics_vs_n_centers(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
-    exp9_posterior_gm_am(epsilon=epsilon, output_dir=output_dir)
-    exp10_power_fdr_vs_epsilon(n_reps=n_reps, output_dir=output_dir)
-    exp11_power_fdr_vs_n_centers(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
-    exp12_manhattan_plot(output_dir=output_dir)
+    if experiments == 'all' or experiments == 'nyc':
+        exp13_nyc_federation(n_reps=n_reps, epsilon=epsilon, output_dir=output_dir)
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="DP-GWAS msprime experiments.",
+    )
     parser.add_argument("--output_dir", default="../figures")
     parser.add_argument("--n_reps", type=int, default=5)
     parser.add_argument("--epsilon", type=float, default=1.0)
-    parser.add_argument("--tune", action="store_true", default=False)
+    parser.add_argument("--experiments", type=str, default="all", choices=['all', 'regular', 'nyc'])
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)    
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.tune:
-        tune_experiments(args.output_dir, args.n_reps, args.epsilon)
-    else:
-        run_experiments(args.output_dir, args.n_reps, args.epsilon)
+    run_experiments(args)
     print(f"\nAll figures saved to: {args.output_dir}/")
 
 if __name__ == "__main__":
